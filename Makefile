@@ -1,36 +1,55 @@
+# Compilers
 CPUCC = g++
 GPUCC = /usr/local/cuda/bin/nvcc
 
-#CUDA_TARGET_FLAGS = -arch=sm_61      #GTX 1080 on Cameron cluster
-#CUDA_TARGET_FLAGS = -arch=sm_75      #RTX 2080-Ti on Tx cluster
-#CUDA_TARGET_FLAGS = -arch=sm_86      #RTX 3080 on Sh cluster
+# Architecture Flags 
+# CUDA_TARGET_FLAGS = -arch=sm_61      # GTX 1080
+# CUDA_TARGET_FLAGS = -arch=sm_75      # RTX 2080-Ti
+# CUDA_TARGET_FLAGS = -arch=sm_86      # RTX 3080
 
-CXXFLAGS = -DDP
-CXXFLAGS += -I. -I/usr/local/cuda/include/ -I/usr/include/x86_64-linux-gnu/
+# Compiler flags
+# CXXFLAGS = -DDP -I. -I./lib -I/usr/local/cuda/include -I/usr/include/x86_64-linux-gnu
+CXXFLAGS = -DDP -I. -I./lib
 CC_CXXFLAGS = -Ofast -fopenmp
 CUDA_CXXFLAGS = -O3 $(CUDA_TARGET_FLAGS)
 
-CC_LDFLAGS =  -fopenmp -L/usr/local/x86_64-linux-gnu
-CUDA_LDFLAGS = -L/usr/local/cuda/lib64/ 
+# Linker flags
+# cnpy requires -lz e.i zlib 
+CC_LDFLAGS = -fopenmp -lz
+# CUDA_LDFLAGS = -L/usr/local/cuda/lib64
+# CUDA_LIBS = -lcudart -lcuda
 
-CUDA_LIBS = -lcudart -lcuda
+# Source files
+CC_SOURCES = main.cpp utils.cpp lib/cnpy.cpp
+# CUDA_SOURCES = gpu.cu
 
-CC_SOURCES =  main.cpp utils.cpp
-CUDA_SOURCES = gpu.cu 
-CC_OBJECTS = $(CC_SOURCES:%.cc=%.o)
-CUDA_OBJECTS = $(CUDA_SOURCES:%.cu=%.o)
+# Dirs
+OBJECT_DIR = objects
+LIB_DIR = lib
+
+# Object Lists
+CC_OBJECTS = $(patsubst %.cpp,$(OBJECT_DIR)/%.o,$(CC_SOURCES))
+CUDA_OBJECTS = $(patsubst %.cu,$(OBJECT_DIR)/%.o,$(CUDA_SOURCES))
 
 EXECNAME = main
 
+all: $(EXECNAME)
+	./$(EXECNAME)
 
-all:
-	$(CPUCC) -c $(CC_SOURCES) $(CXXFLAGS) $(CC_CXXFLAGS)
-	$(CPUCC) -o $(EXECNAME) $(CC_LDFLAGS) $(CC_OBJECTS)
+# Linking Rule
+$(EXECNAME): $(CC_OBJECTS) $(CUDA_OBJECTS)
+	$(CPUCC) -o $@ $^ $(CC_LDFLAGS) $(CUDA_LDFLAGS) $(CUDA_LIBS)
 
-# gpu stuff
-# 	$(GPUCC) -c $(CUDA_SOURCES) $(CXXFLAGS) $(CUDA_CXXFLAGS)
-# 	$(CPUCC) -o $(EXECNAME) $(CC_LDFLAGS) $(CUDA_LDFLAGS) $(CC_OBJECTS) $(CUDA_OBJECTS) $(CUDA_LIBS) $(CC_LIBS)
+# C++ Compilation Rule
+$(OBJECT_DIR)/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CPUCC) -c $< $(CXXFLAGS) $(CC_CXXFLAGS) -o $@
 
+# GPU Compilation Rule
+# $(OBJECT_DIR)/%.o: %.cu
+# 	@mkdir -p $(dir $@)
+# 	$(GPUCC) -c $< $(CXXFLAGS) $(CUDA_CXXFLAGS) -o $@
 
+# Clean 
 clean:
-	rm -f *.o $(EXECNAME)
+	rm -rf $(OBJECT_DIR) $(EXECNAME)

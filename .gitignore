@@ -5,4 +5,7 @@
 *.cubin
 *.fatbin
 *.o
+.vscode
 main
+*.npy
+objects/*

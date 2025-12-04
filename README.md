@@ -1,9 +1,11 @@
-# Molecules Llustering
+# Molecules Clustering
 Clustering molecules dynamics on GPU
 
 # Download the dataset
 https://www.dsimb.inserm.fr/ATLAS/database/ATLAS/1k5n_A/1k5n_A_protein.zip
-from this website
+and unzip it in a `/dataset` folder
+
+Dataset website
 https://www.dsimb.inserm.fr/ATLAS/database/ATLAS/1k5n_A/1k5n_A.html
 
 # Building the chemfiles library to read the .xtc files:

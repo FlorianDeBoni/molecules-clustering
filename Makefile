@@ -1,6 +1,6 @@
 # Compilers
 CPUCC = g++
-GPUCC = /usr/local/cuda/bin/nvcc
+GPUCC = nvcc
 
 # Architecture Flags 
 # CUDA_TARGET_FLAGS = -arch=sm_61       # GTX 1080

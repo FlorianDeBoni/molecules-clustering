@@ -2,7 +2,8 @@
 Clustering molecules dynamics on GPU
 
 # Setup
-In the resulting folder of cloning this repository:
+This project uses `g++` and `nvcc` for compilation.  
+In the resulting folder from cloning this repository, do the following:
 ### 1. Download the dataset
 [Download raw dataset](https://www.dsimb.inserm.fr/ATLAS/database/ATLAS/1k5n_A/1k5n_A_protein.zip)
 and unzip it in a `/dataset` folder

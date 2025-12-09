@@ -25,6 +25,7 @@ public:
     size_t getN_dims() const;
     std::ifstream& getFile() const;
     std::vector<float> readFrame(size_t frame_idx);
+    float* loadData(size_t n_subset_frames);
 };
 
 #endif

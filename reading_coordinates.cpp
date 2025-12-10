@@ -8,16 +8,29 @@
 
 #include "FileUtils.h"
 #include <iostream>
+#include "gpu.h"
 
 int main() {
     
     FileUtils file; 
 
-    std::vector<float> frame = file.readFrame(1);
+    size_t n_subset_frames = 100; // 523mb
 
-    std::cout << frame[0] << "," << frame[1] << "," << frame[2] << std::endl << std::endl; 
+    float* frame = file.loadData(n_subset_frames);
 
-    std::cout << file << std::endl;
+    std::cout << frame[0] << "," << frame[1] << "," << frame[2] << std::endl;
 
+    // std::cout << file << std::endl;
+
+    file.reorderByLine(frame, n_subset_frames);
+
+    std::cout << frame[0] << "," << frame[1] << "," << frame[2] << std::endl;
+
+    float* frameGPU;
+    allocateOnGPU(&frameGPU, n_subset_frames*file.getN_atoms()*file.getN_dims()*sizeof(float));
+    cudaDeviceSynchronize();
+
+    CHECK_SUCCESS(cudaFree(frameGPU), "cudafree");
+    delete[] frame;
     return 0;
 }

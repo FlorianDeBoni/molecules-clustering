@@ -1,27 +1,24 @@
 # Molecules Clustering
 Clustering molecules dynamics on GPU
 
-# Download the dataset
-https://www.dsimb.inserm.fr/ATLAS/database/ATLAS/1k5n_A/1k5n_A_protein.zip
+# Setup
+This project uses `g++` and `nvcc` for compilation.  
+In the resulting folder from cloning this repository, do the following:
+### 1. Download the dataset
+[Download raw dataset](https://www.dsimb.inserm.fr/ATLAS/database/ATLAS/1k5n_A/1k5n_A_protein.zip)
 and unzip it in a `/dataset` folder
 
-Dataset website
-https://www.dsimb.inserm.fr/ATLAS/database/ATLAS/1k5n_A/1k5n_A.html
+[For more info on the data](https://www.dsimb.inserm.fr/ATLAS/database/ATLAS/1k5n_A/1k5n_A.html)
 
-# Building the chemfiles library to read the .xtc files:
+### 2. Install cmake
+Make sure to have cmake installed, it's used to build the [chemfiles](https://github.com/chemfiles/chemfiles) library locally to read the raw data.  
+For linux:
 ```bash
-git clone https://github.com/chemfiles/chemfiles
-cd chemfiles
-mkdir build
-cd build
-cmake .. # various options are allowed here
-cmake --build .
-# if you whant to run the tests before installing:
-ctest
-cmake --build . --target install
+sudo apt install cmake
 ```
 
-# Read files:
-1. Create a folder named `output`
-2. Compile and run `md_reader.cpp` to convert the .xtc files into a binary one
-3. Compile and run  `reading_coordinates` to test
+### 3. Run make
+```bash
+make
+```
+This will compile the chemfiles library, convert the raw data into a binary file for ease of use and subsequently compiles and runs the main program.

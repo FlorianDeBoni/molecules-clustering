@@ -3,3 +3,5 @@ output*
 chemfiles*
 md_reader
 reading_coordinates
+objects
+main

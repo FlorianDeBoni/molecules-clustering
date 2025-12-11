@@ -74,25 +74,40 @@ std::vector<float> FileUtils::readFrame(size_t frame_idx) {
 }
 
 /*
-* Reorders a flat frame_data array from
-* (N * n * 3) to (N * 3 * n)
+Before:
+Frame0: [atom0_x, atom0_y, atom0_z, atom1_x, atom1_y, atom1_z, ...]
+Frame1: [atom0_x, atom0_y, atom0_z, atom1_x, atom1_y, atom1_z, ...]
+
+After:
+All X coords: [atom0_frame0, atom0_frame1, ..., atom0_frameN, atom1_frame0, atom1_frame1, ...]
+All Y coords: [atom0_frame0, atom0_frame1, ..., atom0_frameN, atom1_frame0, atom1_frame1, ...]
+All Z coords: [atom0_frame0, atom0_frame1, ..., atom0_frameN, atom1_frame0, atom1_frame1, ...]
 */
 void FileUtils::reorderByLine(float* frame_data, const size_t n_subset_frames) {
 
-    // buffer
-    std::vector<float> tmp(3 * n_atoms);
+    const size_t n_coords = 3;
+    const size_t frame_size = n_atoms * n_coords;
+    const size_t total = n_subset_frames * frame_size;
 
-    for (size_t frame_idx = 0; frame_idx < n_subset_frames; frame_idx++){
-        float* base = frame_data + frame_idx * n_atoms * 3;
+    std::vector<float> tmp(total);
+    memcpy(tmp.data(), frame_data, total * sizeof(float));
 
-        // copy original (N * n * 3) block
-        memcpy(tmp.data(), base, 3 * n_atoms * sizeof(float));
+    // Indexing helper lambdas
+    auto old_index = [&](size_t f, size_t a, size_t c) {
+        return f * frame_size + a * n_coords + c; // original layout
+    };
 
-        // now write in (N * 3 * n) order
+    auto new_index = [&](size_t a, size_t f, size_t c) {
+        return c * n_atoms * n_subset_frames
+             + a * n_subset_frames
+             + f;
+    };
+
+    for (size_t f = 0; f < n_subset_frames; ++f) {
         for (size_t a = 0; a < n_atoms; ++a) {
-            base[a]             = tmp[3 * a + 0];
-            base[a + n_atoms]   = tmp[3 * a + 1];
-            base[a + 2*n_atoms] = tmp[3 * a + 2];
+            for (size_t c = 0; c < n_coords; ++c) {
+                frame_data[new_index(a, f, c)] = tmp[old_index(f, a, c)];
+            }
         }
     }
 }
@@ -106,27 +121,30 @@ void FileUtils::reorderByLine(float* frame_data, const size_t n_subset_frames) {
 */
 float* FileUtils::loadData(size_t n_subset_frames) {
     if (n_subset_frames > n_frames) {
-        std::cerr << "Error: number of frames requested " << n_subset_frames << " > " << n_frames << " in the file" << std::endl;
-        exit(1);
-    }
-    size_t data_size_bytes = n_subset_frames * n_atoms * n_dims * sizeof(float);
-
-    // no throw to handle error ourselves
-    float* data = new (std::nothrow) float[data_size_bytes];
-
-    if (data == nullptr) {
-        std::cerr << "Error allocating " << data_size_bytes / (1000*1000) << " Mb" << std::endl;
+        std::cerr << "Error: number of frames requested " << n_subset_frames << " > " << n_frames << std::endl;
         exit(1);
     }
 
-    // skipping metadata 
-    size_t offset = (3 * sizeof(size_t));
-    file.seekg(offset, std::ios::beg);
-    
-    // extract data
-    file.read(reinterpret_cast<char*>(data), data_size_bytes);
+    size_t n_elements = n_subset_frames * n_atoms * n_dims;
+    float* data = new (std::nothrow) float[n_elements];
+    if (!data) {
+        std::cerr << "Error allocating " << n_elements * sizeof(float) / (1024*1024) << " Mb" << std::endl;
+        exit(1);
+    }
 
-    std::cout << "Successfully Loaded " << data_size_bytes / (1000*1000) << " Mb" << std::endl;
+    // Reset file state and seek to data start
+    file.clear(); 
+    file.seekg(3 * sizeof(size_t), std::ios::beg);
+
+    file.read(reinterpret_cast<char*>(data), n_elements * sizeof(float));
+    if (!file) {
+        std::cerr << "Error reading frame data from file" << std::endl;
+        delete[] data;
+        exit(1);
+    }
+
+    std::cout << "Successfully Loaded " << n_elements * sizeof(float) / (1024*1024) << " Mb" << std::endl;
 
     return data;
 }
+

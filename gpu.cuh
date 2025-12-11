@@ -21,13 +21,13 @@ inline void freeOnGPU(float* ptr) {
     if(ptr) cudaFree(ptr);
 }
 
-// Kernel declaration
-__global__ void loadSnapshotKernel(
-    const float* src,
-    float* dst,
+__global__
+void computeA(
+    const float* __restrict__ dst,   // reordered coordinates: X,Y,Z blocks
+    float* __restrict__ outA,        // N_frames × 9 matrices
     int N_frames,
     int N_atoms,
-    int N_dims
+    int ref_idx
 );
 
 #endif // GPU_CUH

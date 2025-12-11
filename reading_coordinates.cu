@@ -6,10 +6,6 @@
     -L/usr/local/cuda/lib64 -lcudart \
     -lchemfiles \
     -o reading_coordinates
-
-
-    Run:
-    ./reading_coordinates
 */
 
 #include "FileUtils.h"
@@ -25,39 +21,40 @@ int main() {
     size_t N_atoms  = file.getN_atoms();
     size_t N_dims   = file.getN_dims();
 
+    // Load and reorder into X,Y,Z blocks
     float* frame = file.loadData(N_frames);
     file.reorderByLine(frame, N_frames);
 
-    std::cout << frame[0] << ", " << frame[1] << ", " << frame[2] << " ... " << frame[N_atoms * N_dims * N_frames -1] << std::endl;
-
-    // Upload reordered data to GPU
-    float* frameGPU;
     size_t total_size = N_frames * N_atoms * N_dims * sizeof(float);
+
+    // Copy reordered CPU → GPU
+    float* frameGPU;
     cudaMalloc(&frameGPU, total_size);
     cudaMemcpy(frameGPU, frame, total_size, cudaMemcpyHostToDevice);
 
-    // Allocate output snapshot buffer
-    float* snapshotGPU;
-    size_t snapshot_size = total_size;   // 1 snapshot per frame
-    cudaMalloc(&snapshotGPU, snapshot_size);
+    // Allocate output 3x3 matrices: one per frame
+    float* d_outA;
+    cudaMalloc(&d_outA, N_frames * 9 * sizeof(float));
 
-    // Launch kernel
+    // Launch computeA
     int threads = 256;
     int blocks = (N_frames + threads - 1) / threads;
 
-    loadSnapshotKernel<<<blocks, threads>>>(
-        frameGPU,
-        snapshotGPU,
+    computeA<<<blocks, threads>>>(
+        frameGPU,   // reordered coordinates
+        d_outA,     // output A matrices
         N_frames,
         N_atoms,
-        N_dims
+        0           // ref snapshot index
     );
     cudaDeviceSynchronize();
-    std::cout << "Snapshot kernel done.\n";
+
+    std::cout << "A Matrix kernel done.\n";
 
     // Cleanup
-    cudaFree(frameGPU);
-    cudaFree(snapshotGPU);
     delete[] frame;
+    cudaFree(frameGPU);
+    cudaFree(d_outA);
+
     return 0;
 }

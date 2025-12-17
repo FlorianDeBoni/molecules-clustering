@@ -86,17 +86,18 @@ void compute_eigenvalues_symmetric_3x3(float m00, float m01, float m02,
 
     // Using Cardano's formula to find eigenvalues
     float p = (3.0f*a*c - b*b) / (3.0f * a * a);
-    float r = std::pow(- (p/3.0f), 3.0f/2.0f);
+    float r = powf(- (p/3.0f), 3.0f/2.0f);
+    float sqrc_r = cbrtf(r);
+
     float q = ((27.0f * a * a * d) - (9.0f * a * b * c) + (2.0f * b * b * b)) / (27.0f * a * a * a);
     // Ensure in [-1, 1]
     float cosarg = -q / (2.0f * r);
     cosarg = fminf(1.0f, fmaxf(-1.0f, cosarg));
     float theta = (1.0f/3.0f) * acosf(cosarg);
 
-
-    lambda[0] = 2.0f * std::pow(r, 1.0f/3.0f) * cosf(theta) - ( b / (3.0f * a) );
-    lambda[1] = 2.0f * std::pow(r, 1.0f/3.0f) * cosf(theta + (2.0f * M_PI / 3.0f)) - ( b / (3.0f * a) );
-    lambda[2] = 2.0f * std::pow(r, 1.0f/3.0f) * cosf(theta + (4.0f * M_PI / 3.0f)) - ( b / (3.0f * a) );
+    lambda[0] = 2.0f * sqrc_r * cosf(theta) - ( b / (3.0f * a) );
+    lambda[1] = 2.0f * sqrc_r * cosf(theta + (2.0f * M_PI / 3.0f)) - ( b / (3.0f * a) );
+    lambda[2] = 2.0f * sqrc_r * cosf(theta + (4.0f * M_PI / 3.0f)) - ( b / (3.0f * a) );
     
     // Sort eigenvalues in descending order
     if (lambda[0] < lambda[1]) { float tmp = lambda[0]; lambda[0] = lambda[1]; lambda[1] = tmp; }
@@ -109,13 +110,19 @@ void RMSD(
     const float* __restrict__ dst,   // reordered: [X-block | Y-block | Z-block]
     int N_frames,
     int N_atoms,
-    int ref_idx
+    int ref_idx,
+    int k,
+    float* out
 )
 {
     int snap = blockIdx.x * blockDim.x + threadIdx.x;
-    if (snap >= N_frames || snap == ref_idx)
-        // Thread out of range, does nothing
+    if (snap >= N_frames)
+        // Thread out of range, does nothing or RMSD with itself
         return;
+    if (snap == ref_idx) {
+        out[k * N_frames + snap] = 0.0f;
+        return;
+    }
 
     // Offset entre 2 bloques de coordonnées x y z
     int block = N_atoms * N_frames;
@@ -196,17 +203,6 @@ void RMSD(
     float eigenvalues[3];
     compute_eigenvalues_symmetric_3x3(m00, m01, m02, m11, m12, m22, eigenvalues);
 
-    // if (snap == 1) {
-    //     printf("Debug snap %d:\n", snap);
-    //     printf("  Centroids X: (%.6f, %.6f, %.6f)\n", centroid_X_x, centroid_X_y, centroid_X_z);
-    //     printf("  Centroids Y: (%.6f, %.6f, %.6f)\n", centroid_Y_x, centroid_Y_y, centroid_Y_z);
-    //     printf("  A matrix:\n");
-    //     printf("  [%.6f %.6f %.6f]\n", a00, a01, a02);
-    //     printf("  [%.6f %.6f %.6f]\n", a10, a11, a12);
-    //     printf("  [%.6f %.6f %.6f]\n", a20, a21, a22);
-    //     printf("  Eigenvalues: %.6f, %.6f, %.6f\n", eigenvalues[0], eigenvalues[1], eigenvalues[2]);
-    // }
-
     // STEP 3: compute eigenvectors
     float v0[3], v1[3], v2[3];
     
@@ -217,7 +213,7 @@ void RMSD(
     // Orthonormalization
     // normalize v0
     float n0 = rsqrtf(v0[0]*v0[0] + v0[1]*v0[1] + v0[2]*v0[2]);
-    v0[0]/=n0; v0[1]/=n0; v0[2]/=n0;
+    v0[0]*=n0; v0[1]*=n0; v0[2]*=n0;
 
     // v1 = v1 - (v1·v0) v0
     float dot10 = v1[0]*v0[0] + v1[1]*v0[1] + v1[2]*v0[2];
@@ -227,7 +223,7 @@ void RMSD(
 
     // normalize v1
     float n1 = rsqrtf(v1[0]*v1[0] + v1[1]*v1[1] + v1[2]*v1[2]);
-    v1[0]/=n1; v1[1]/=n1; v1[2]/=n1;
+    v1[0]*=n1; v1[1]*=n1; v1[2]*=n1;
 
     // v2 = v0 × v1
     v2[0] = v0[1]*v1[2] - v0[2]*v1[1];
@@ -280,14 +276,6 @@ void RMSD(
         u2[1] = -u2[1];
         u2[2] = -u2[2];
     }
-
-
-    // if (snap == 1) {
-    //     printf("  Rotation matrix U:\n");
-    //     printf("  [%.6f %.6f %.6f]\n", u0[0], u1[0], u2[0]);
-    //     printf("  [%.6f %.6f %.6f]\n", u0[1], u1[1], u2[1]);
-    //     printf("  [%.6f %.6f %.6f]\n", u0[2], u1[2], u2[2]);
-    // }
     
     // Calculate RMSD: minimize ||X_centered - R*Y_centered||
     float sum_squared_dist = 0.0f;
@@ -326,8 +314,6 @@ void RMSD(
     }
     
     float rmsd = sqrtf(sum_squared_dist / N_atoms);
-    
-    if (snap != ref_idx && snap <= 5) {
-        printf("  RMSD: %.6f\n", rmsd);
-    }
+
+    out[k * N_frames + snap] = rmsd;
 }

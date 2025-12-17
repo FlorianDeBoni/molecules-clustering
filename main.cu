@@ -13,6 +13,9 @@
 #include <algorithm>
 #include <random>
 #include "gpu.cuh"
+#include <cuda_runtime.h>
+#include <stdio.h>
+
 
 void pickRandomCentroids(int N_frames, int K, int* centroids) {
     // Create a vector with all frame indices
@@ -137,8 +140,14 @@ float daviesBouldinIndex(
 
 int main() {
 
-    int K = 5;
-    int MAX_ITER = 20;
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    cudaEventRecord(start, 0);
+
+    int K = 10;
+    int MAX_ITER = 50;
 
     FileUtils file; 
 
@@ -165,7 +174,7 @@ int main() {
     size_t size_rmsd = N_frames * N_frames * sizeof(float);
     cudaMalloc(&rmsd, size_rmsd);
 
-    dim3 threads(64, 4);
+    dim3 threads(256, 1);
     dim3 blocks((N_frames + threads.x - 1.0f) / threads.x, (N_frames + threads.y - 1.0f) / threads.y);
 
     std::cout << "Kernel Start" << std::endl;
@@ -241,6 +250,15 @@ int main() {
     delete[] clusters;
     cudaFree(frameGPU);
     cudaFree(rmsd);
+
+    cudaEventRecord(stop, 0);
+
+    cudaEventSynchronize(stop);
+
+    float elapsed_ms = 0.0f;
+    cudaEventElapsedTime(&elapsed_ms, start, stop);
+
+    printf("Main time execution: %.1f s\n", elapsed_ms/1000.0f);
 
     return 0;
 }

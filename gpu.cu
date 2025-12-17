@@ -107,7 +107,7 @@ void compute_eigenvalues_symmetric_3x3(float m00, float m01, float m02,
 
 __global__
 void RMSD(
-    const float* __restrict__ dst,   // reordered: [X-block | Y-block | Z-block]
+    const float* __restrict__ dst,
     int N_frames,
     int N_atoms,
     float* out
@@ -115,20 +115,19 @@ void RMSD(
 {
     int snap = blockIdx.x * blockDim.x + threadIdx.x;
     int ref_idx = blockIdx.y * blockDim.y + threadIdx.y;
-    if (snap >= N_frames || ref_idx > N_frames)
-        // Thread out of range, does nothing
+    
+    // FIX 1: Correct bounds check
+    if (snap >= N_frames || ref_idx >= N_frames)
         return;
+        
     if (snap == ref_idx) {
-        //  RMSD with itself
         out[ref_idx * N_frames + snap] = 0.0f;
         return;
     }
 
-
-    // Offset entre 2 bloques de coordonnées x y z
     int block = N_atoms * N_frames;
 
-    // STEP 0: Compute center to center the molecules coordinates
+    // STEP 0: Compute centroids
     float centroid_X_x = 0.0f, centroid_X_y = 0.0f, centroid_X_z = 0.0f;
     float centroid_Y_x = 0.0f, centroid_Y_y = 0.0f, centroid_Y_z = 0.0f;
 
@@ -159,8 +158,7 @@ void RMSD(
     centroid_Y_y /= N_atoms;
     centroid_Y_z /= N_atoms;
 
-    // STEP 1: Build correlation matrix A = (X-centroid_X) * (Y-centroid_Y)^T
-    // 3×3 accumulator for A = X_centered * Y_centered^T
+    // STEP 1: Build correlation matrix A
     float a00=0, a01=0, a02=0;
     float a10=0, a11=0, a12=0;
     float a20=0, a21=0, a22=0;
@@ -175,7 +173,6 @@ void RMSD(
         int ys = 1*block + a*N_frames + snap;
         int zs = 2*block + a*N_frames + snap;
 
-        // Center the coordinates
         float Xx = dst[xr] - centroid_X_x;
         float Xy = dst[yr] - centroid_X_y;
         float Xz = dst[zr] - centroid_X_z;
@@ -184,60 +181,47 @@ void RMSD(
         float Yy = dst[ys] - centroid_Y_y;
         float Yz = dst[zs] - centroid_Y_z;
 
-        // A = X_centered * Y_centered^T
         a00 += Xx * Yx;  a01 += Xx * Yy;  a02 += Xx * Yz;
         a10 += Xy * Yx;  a11 += Xy * Yy;  a12 += Xy * Yz;
         a20 += Xz * Yx;  a21 += Xz * Yy;  a22 += Xz * Yz;
     }
 
-    // Compute M = A^T * A (symmetric 3×3)
+    // Compute M = A^T * A
     float m00 = a00*a00 + a10*a10 + a20*a20;
     float m01 = a00*a01 + a10*a11 + a20*a21;
     float m02 = a00*a02 + a10*a12 + a20*a22;
-
     float m11 = a01*a01 + a11*a11 + a21*a21;
     float m12 = a01*a02 + a11*a12 + a21*a22;
-
     float m22 = a02*a02 + a12*a12 + a22*a22;
 
-    // STEP2: Compute eigenvalues
+    // STEP 2: Compute eigenvalues
     float eigenvalues[3];
     compute_eigenvalues_symmetric_3x3(m00, m01, m02, m11, m12, m22, eigenvalues);
 
-    // STEP 3: compute eigenvectors
+    // STEP 3: Compute eigenvectors
     float v0[3], v1[3], v2[3];
     
     compute_eigenvector(m00, m01, m02, m11, m12, m22, eigenvalues[0], v0);
     compute_eigenvector(m00, m01, m02, m11, m12, m22, eigenvalues[1], v1);
     compute_eigenvector(m00, m01, m02, m11, m12, m22, eigenvalues[2], v2);
 
-    // Orthonormalization
-    // normalize v0
+    // Orthonormalization: Gram-Schmidt
     float n0 = rsqrtf(v0[0]*v0[0] + v0[1]*v0[1] + v0[2]*v0[2]);
     v0[0]*=n0; v0[1]*=n0; v0[2]*=n0;
 
-    // v1 = v1 - (v1·v0) v0
     float dot10 = v1[0]*v0[0] + v1[1]*v0[1] + v1[2]*v0[2];
     v1[0] -= dot10*v0[0];
     v1[1] -= dot10*v0[1];
     v1[2] -= dot10*v0[2];
 
-    // normalize v1
     float n1 = rsqrtf(v1[0]*v1[0] + v1[1]*v1[1] + v1[2]*v1[2]);
     v1[0]*=n1; v1[1]*=n1; v1[2]*=n1;
 
-    // v2 = v0 × v1
     v2[0] = v0[1]*v1[2] - v0[2]*v1[1];
     v2[1] = v0[2]*v1[0] - v0[0]*v1[2];
     v2[2] = v0[0]*v1[1] - v0[1]*v1[0];
 
-    // STEP 4: Solve AV = UΣ where Σ contains eigenvalues
-    // Compute singular values (sqrt of eigenvalues, ensuring non-negative)
-    float s0 = sqrtf(fmaxf(eigenvalues[0], 0.0f));
-    float s1 = sqrtf(fmaxf(eigenvalues[1], 0.0f));
-    float s2 = sqrtf(fmaxf(eigenvalues[2], 0.0f));
-    
-    // Compute A*V
+    // STEP 4: Compute U from A*V
     float av0[3], av1[3], av2[3];
     
     av0[0] = a00*v0[0] + a01*v0[1] + a02*v0[2];
@@ -254,31 +238,60 @@ void RMSD(
     
     float u0[3], u1[3], u2[3];
 
-    u0[0] = av0[0] * (1 / sqrtf(eigenvalues[0]));
-    u0[1] = av0[1] * (1 / sqrtf(eigenvalues[0]));
-    u0[2] = av0[2] * (1 / sqrtf(eigenvalues[0]));
+    float s0 = sqrtf(fmaxf(eigenvalues[0], 1e-8f));
+    float s1 = sqrtf(fmaxf(eigenvalues[1], 1e-8f));
+    float s2 = sqrtf(fmaxf(eigenvalues[2], 1e-8f));
 
-    u1[0] = av1[0] * (1 / sqrtf(eigenvalues[1]));
-    u1[1] = av1[1] * (1 / sqrtf(eigenvalues[1]));
-    u1[2] = av1[2] * (1 / sqrtf(eigenvalues[1]));
+    u0[0] = av0[0] / s0;
+    u0[1] = av0[1] / s0;
+    u0[2] = av0[2] / s0;
 
-    u2[0] = av2[0] * (1 / sqrtf(eigenvalues[2]));
-    u2[1] = av2[1] * (1 / sqrtf(eigenvalues[2]));
-    u2[2] = av2[2] * (1 / sqrtf(eigenvalues[2]));
+    u1[0] = av1[0] / s1;
+    u1[1] = av1[1] / s1;
+    u1[2] = av1[2] / s1;
 
-    // We want direct rotation
-    float detR =
-        u0[0]*(u1[1]*u2[2] - u1[2]*u2[1]) -
-        u1[0]*(u0[1]*u2[2] - u0[2]*u2[1]) +
-        u2[0]*(u0[1]*u1[2] - u0[2]*u1[1]);
+    u2[0] = av2[0] / s2;
+    u2[1] = av2[1] / s2;
+    u2[2] = av2[2] / s2;
+
+    // Compute rotation matrix R = U*V^T
+    float R[3][3];
+    R[0][0] = u0[0]*v0[0] + u1[0]*v1[0] + u2[0]*v2[0];
+    R[0][1] = u0[0]*v0[1] + u1[0]*v1[1] + u2[0]*v2[1];
+    R[0][2] = u0[0]*v0[2] + u1[0]*v1[2] + u2[0]*v2[2];
+
+    R[1][0] = u0[1]*v0[0] + u1[1]*v1[0] + u2[1]*v2[0];
+    R[1][1] = u0[1]*v0[1] + u1[1]*v1[1] + u2[1]*v2[1];
+    R[1][2] = u0[1]*v0[2] + u1[1]*v1[2] + u2[1]*v2[2];
+
+    R[2][0] = u0[2]*v0[0] + u1[2]*v1[0] + u2[2]*v2[0];
+    R[2][1] = u0[2]*v0[1] + u1[2]*v1[1] + u2[2]*v2[1];
+    R[2][2] = u0[2]*v0[2] + u1[2]*v1[2] + u2[2]*v2[2];
+
+    // Check determinant
+    float detR = R[0][0]*(R[1][1]*R[2][2] - R[1][2]*R[2][1]) -
+                 R[0][1]*(R[1][0]*R[2][2] - R[1][2]*R[2][0]) +
+                 R[0][2]*(R[1][0]*R[2][1] - R[1][1]*R[2][0]);
 
     if (detR < 0.0f) {
         u2[0] = -u2[0];
         u2[1] = -u2[1];
         u2[2] = -u2[2];
+        
+        R[0][0] = u0[0]*v0[0] + u1[0]*v1[0] + u2[0]*v2[0];
+        R[0][1] = u0[0]*v0[1] + u1[0]*v1[1] + u2[0]*v2[1];
+        R[0][2] = u0[0]*v0[2] + u1[0]*v1[2] + u2[0]*v2[2];
+        
+        R[1][0] = u0[1]*v0[0] + u1[1]*v1[0] + u2[1]*v2[0];
+        R[1][1] = u0[1]*v0[1] + u1[1]*v1[1] + u2[1]*v2[1];
+        R[1][2] = u0[1]*v0[2] + u1[1]*v1[2] + u2[1]*v2[2];
+        
+        R[2][0] = u0[2]*v0[0] + u1[2]*v1[0] + u2[2]*v2[0];
+        R[2][1] = u0[2]*v0[1] + u1[2]*v1[1] + u2[2]*v2[1];
+        R[2][2] = u0[2]*v0[2] + u1[2]*v1[2] + u2[2]*v2[2];
     }
-    
-    // Calculate RMSD: minimize ||X_centered - R*Y_centered||
+
+    // Calculate RMSD using R matrix in the loop
     float sum_squared_dist = 0.0f;
     
     for (int a = 0; a < N_atoms; ++a)
@@ -287,7 +300,6 @@ void RMSD(
         int yr = 1*block + a*N_frames + ref_idx;
         int zr = 2*block + a*N_frames + ref_idx;
         
-        // Center reference coordinates
         float Xi_x = dst[xr] - centroid_X_x;
         float Xi_y = dst[yr] - centroid_X_y;
         float Xi_z = dst[zr] - centroid_X_z;
@@ -296,17 +308,15 @@ void RMSD(
         int ys = 1*block + a*N_frames + snap;
         int zs = 2*block + a*N_frames + snap;
         
-        // Center snapshot coordinates
         float Yi_x = dst[xs] - centroid_Y_x;
         float Yi_y = dst[ys] - centroid_Y_y;
         float Yi_z = dst[zs] - centroid_Y_z;
         
-        // Apply rotation to centered Y: R*Y_centered
-        float RYi_x = u0[0]*Yi_x + u1[0]*Yi_y + u2[0]*Yi_z;
-        float RYi_y = u0[1]*Yi_x + u1[1]*Yi_y + u2[1]*Yi_z;
-        float RYi_z = u0[2]*Yi_x + u1[2]*Yi_y + u2[2]*Yi_z;
+        // Apply rotation using R matrix
+        float RYi_x = R[0][0]*Yi_x + R[0][1]*Yi_y + R[0][2]*Yi_z;
+        float RYi_y = R[1][0]*Yi_x + R[1][1]*Yi_y + R[1][2]*Yi_z;
+        float RYi_z = R[2][0]*Yi_x + R[2][1]*Yi_y + R[2][2]*Yi_z;
         
-        // Compute squared distance: ||X_centered - R*Y_centered||²
         float diff_x = Xi_x - RYi_x;
         float diff_y = Xi_y - RYi_y;
         float diff_z = Xi_z - RYi_z;
@@ -316,5 +326,7 @@ void RMSD(
     
     float rmsd = sqrtf(sum_squared_dist / N_atoms);
 
+    // Write symmetric entries
     out[ref_idx * N_frames + snap] = rmsd;
+    out[snap * N_frames + ref_idx] = rmsd;
 }

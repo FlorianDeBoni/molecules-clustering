@@ -1,11 +1,11 @@
 /*
     Compile with:
     nvcc -ccbin /usr/bin/g++-12 -std=c++11 -O3 \
-    reading_coordinates.cu FileUtils.cpp gpu.cu \
+    main.cu FileUtils.cpp gpu.cu \
     -I/usr/local/cuda/include \
     -L/usr/local/cuda/lib64 -lcudart \
     -lchemfiles \
-    -o reading_coordinates
+    -o main
 */
 
 #include "FileUtils.h"
@@ -144,7 +144,8 @@ int main() {
 
     std::cout << file << std::endl;
 
-    size_t N_frames = 5000;
+    // size_t N_frames = file.getN_frames();
+    size_t N_frames = 10000;
     size_t N_atoms  = file.getN_atoms();
     size_t N_dims   = file.getN_dims();
 
@@ -164,21 +165,19 @@ int main() {
     size_t size_rmsd = N_frames * N_frames * sizeof(float);
     cudaMalloc(&rmsd, size_rmsd);
 
-    dim3 threads(256);
-    dim3 blocks((N_frames + threads.x - 1.0f) / threads.x);
+    dim3 threads(64, 4);
+    dim3 blocks((N_frames + threads.x - 1.0f) / threads.x, (N_frames + threads.y - 1.0f) / threads.y);
 
     std::cout << "Kernel Start" << std::endl;
-    for (int i=0; i<N_frames; i++) {
-        RMSD<<<blocks, threads>>>(
+    RMSD<<<blocks, threads>>>(
         frameGPU,
         N_frames,
         N_atoms,
-        i,
         rmsd
     );
-    }
     cudaDeviceSynchronize();
     std::cout << "Kernel Finished" << std::endl;
+
     float* rmsdHost = new float[N_frames*N_frames];
     cudaMemcpy(rmsdHost, rmsd, size_rmsd, cudaMemcpyDeviceToHost);
 
@@ -203,7 +202,7 @@ int main() {
         updateCentroids(N_frames, K, clusters, rmsdHost, centroids);
     }
 
-    std::cout << "Centroid: " << std::endl;
+    std::cout << "Final centroids: " << std::endl;
     for (int i=0; i<K; i++) {
         std::cout << centroids[i] << std::endl;
     }
@@ -217,6 +216,22 @@ int main() {
     );
 
     std::cout << "Davies–Bouldin index: " << db << std::endl;
+
+    // Print db for random clustering
+    pickRandomCentroids(N_frames, K, centroids);
+    for (int i = 0; i < N_frames; i++) {
+        clusters[i] = rand() % K;
+    }
+    createClusters(N_frames, K, rmsdHost, centroids, clusters);
+    db = daviesBouldinIndex(
+        N_frames,
+        K,
+        clusters,
+        centroids,
+        rmsdHost
+    );
+
+    std::cout << "Random Davies–Bouldin index: " << db << std::endl;
 
 
     // Cleanup

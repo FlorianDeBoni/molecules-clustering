@@ -110,11 +110,11 @@ void RMSD(
     const float* __restrict__ dst,   // reordered: [X-block | Y-block | Z-block]
     int N_frames,
     int N_atoms,
-    int ref_idx,
     float* out
 )
 {
     int snap = blockIdx.x * blockDim.x + threadIdx.x;
+    int ref_idx = blockIdx.y * blockDim.y + threadIdx.y;
     if (snap >= N_frames || ref_idx > N_frames)
         // Thread out of range, does nothing
         return;
@@ -159,7 +159,7 @@ void RMSD(
     centroid_Y_y /= N_atoms;
     centroid_Y_z /= N_atoms;
 
-    // STEP 1: Build correlation matrix A = (X-centroid_X)^T * (Y-centroid_Y)
+    // STEP 1: Build correlation matrix A = (X-centroid_X) * (Y-centroid_Y)^T
     // 3×3 accumulator for A = X_centered * Y_centered^T
     float a00=0, a01=0, a02=0;
     float a10=0, a11=0, a12=0;

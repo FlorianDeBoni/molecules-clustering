@@ -26,7 +26,6 @@ void RMSD(
     const float* __restrict__ dst,   // reordered coordinates: X,Y,Z blocks
     int N_frames,
     int N_atoms,
-    int ref_idx,
     float*out
 );
 

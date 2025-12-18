@@ -75,31 +75,37 @@ void compute_eigenvalues_symmetric_3x3(float m00, float m01, float m02,
                                        float m11, float m12, float m22,
                                        float* lambda)
 {
-    // Compute coefficients of characteristic polynomial aλ^3 + bλ^2 + cλ + d
-    float a = -1.0f;
-    // Tr(M)
-    float b = m00 + m11 + m22;
-    // - 0.5 * (Tr(M)^2 - Tr(M^2))
-    float c = - 0.5f * ( b*b - (m00*m00 + m11*m11 + m22*m22 + 2.0f*(m01*m01 + m02*m02 + m12*m12)));
-    // det(M)
-    float d = m00*m11*m22 + 2.0f*m01*m02*m12 - m02*m02*m11 - m01*m01*m22 - m12*m12*m00;
-
-    // Using Cardano's formula to find eigenvalues
-    float p = (3.0f*a*c - b*b) / (3.0f * a * a);
-    float r = powf(- (p/3.0f), 3.0f/2.0f);
-    float sqrc_r = cbrtf(r);
-
-    float q = ((27.0f * a * a * d) - (9.0f * a * b * c) + (2.0f * b * b * b)) / (27.0f * a * a * a);
-    // Ensure in [-1, 1]
-    float cosarg = -q / (2.0f * r);
-    cosarg = fminf(1.0f, fmaxf(-1.0f, cosarg));
-    float theta = (1.0f/3.0f) * acosf(cosarg);
-
-    lambda[0] = 2.0f * sqrc_r * cosf(theta) - ( b / (3.0f * a) );
-    lambda[1] = 2.0f * sqrc_r * cosf(theta + (2.0f * M_PI / 3.0f)) - ( b / (3.0f * a) );
-    lambda[2] = 2.0f * sqrc_r * cosf(theta + (4.0f * M_PI / 3.0f)) - ( b / (3.0f * a) );
+    float trace = m00 + m11 + m22;
+    float mean = trace / 3.0f;
     
-    // Sort eigenvalues in descending order
+    // Shift matrix
+    float sm00 = m00 - mean;
+    float sm11 = m11 - mean;
+    float sm22 = m22 - mean;
+    
+    float p = sm00*sm00 + sm11*sm11 + sm22*sm22 + 2.0f*(m01*m01 + m02*m02 + m12*m12);
+    p = sqrtf(p / 6.0f);
+    
+    float invp = (p > 1e-8f) ? (1.0f / p) : 0.0f;
+    
+    float b00 = sm00 * invp;
+    float b01 = m01 * invp;
+    float b02 = m02 * invp;
+    float b11 = sm11 * invp;
+    float b12 = m12 * invp;
+    float b22 = sm22 * invp;
+    
+    float det = b00*(b11*b22 - b12*b12) - b01*(b01*b22 - b12*b02) + b02*(b01*b12 - b11*b02);
+    det = det / 2.0f;
+    det = fminf(1.0f, fmaxf(-1.0f, det));
+    
+    float phi = acosf(det) / 3.0f;
+    
+    lambda[0] = mean + 2.0f * p * cosf(phi);
+    lambda[2] = mean + 2.0f * p * cosf(phi + (2.0f * M_PI / 3.0f));
+    lambda[1] = 3.0f * mean - lambda[0] - lambda[2];
+    
+    // Sort
     if (lambda[0] < lambda[1]) { float tmp = lambda[0]; lambda[0] = lambda[1]; lambda[1] = tmp; }
     if (lambda[1] < lambda[2]) { float tmp = lambda[1]; lambda[1] = lambda[2]; lambda[2] = tmp; }
     if (lambda[0] < lambda[1]) { float tmp = lambda[0]; lambda[0] = lambda[1]; lambda[1] = tmp; }

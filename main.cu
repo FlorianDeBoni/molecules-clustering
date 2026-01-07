@@ -153,8 +153,8 @@ int main() {
 
     std::cout << file << std::endl;
 
-    // size_t N_frames = file.getN_frames();
-    size_t N_frames = 10000;
+    size_t N_frames = file.getN_frames();
+    // size_t N_frames = 10000;
     size_t N_atoms  = file.getN_atoms();
     size_t N_dims   = file.getN_dims();
 
@@ -174,8 +174,8 @@ int main() {
     size_t size_rmsd = N_frames * N_frames * sizeof(float);
     cudaMalloc(&rmsd, size_rmsd);
 
-    dim3 threads(256, 1);
-    dim3 blocks((N_frames + threads.x - 1.0f) / threads.x, (N_frames + threads.y - 1.0f) / threads.y);
+    dim3 threads(256,1);
+    dim3 blocks((N_frames + threads.x - 1) / threads.x, (N_frames + threads.y - 1) / threads.y);
 
     std::cout << "Kernel Start" << std::endl;
     RMSD<<<blocks, threads>>>(

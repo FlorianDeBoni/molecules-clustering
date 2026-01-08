@@ -1,2 +1,2 @@
 # molecules-clustering
-Clustering molecules on GPU
+Clustering molecules on CPU

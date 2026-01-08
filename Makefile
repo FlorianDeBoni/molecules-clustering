@@ -19,8 +19,8 @@ CUDA_LDFLAGS = -L/usr/local/cuda/lib64 -L/usr/lib/x86_64-linux-gnu
 CUDA_LIBS = -lcudart
 
 # Source files
-CC_SOURCES = reading_coordinates.cpp FileUtils.cpp
-CUDA_SOURCES = gpu.cu
+CC_SOURCES = FileUtils.cpp
+CUDA_SOURCES = main.cu gpu.cu
 
 # Chemfiles lib
 CHEMFILES_GIT = https://github.com/chemfiles/chemfiles

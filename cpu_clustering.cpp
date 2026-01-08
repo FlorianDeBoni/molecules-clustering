@@ -3,27 +3,23 @@
 #include <iostream>
 #include <float.h>
 #include <omp.h>
-#include <cstdlib>
-#include <fstream>
 
-#include <iostream>
-#include <forward_list>
 #include <functional>
 #include <limits>
+#include <algorithm>
 
 #include <cstdlib>
 #include <ctime>
 #include <cmath>
-#include <numbers>
+#include "FileUtils.h"
+#include "RMSD_func.h"
 
-#include <Eigen/Dense>
 
 #define M_PI 3.14159265358979323846
 
 // Pour compilation :
 // cd "C:\Users\Paul\Documents\Projet3A\Code\molecules-clustering"
-// g++ -I "C:\Users\Paul\Documents\Projet3A\Code\molecules-clustering\external\eigen-5.0.0" cpu_clustering.cpp -o cpu_clustering
-
+// g++ -fopenmp cpu_clustering.cpp RMSD_func.cpp -o cpu_clustering
 
 using atome_tab = std::array< double , 3 >;
 // de taille 3 * N
@@ -32,181 +28,8 @@ using snapshot_mod = std::vector < molecule_tab >;
 using rot_matrix = std::vector< std::vector< double > >;
 using matrix_mod = std::vector< std::vector< double > >;
 
+#define M_PI 3.14159265358979323846
 
-// Calcul du produit matriciel carre naif
-matrix_mod matprod(const matrix_mod& A, const matrix_mod& B, int size) {
-    matrix_mod C(size,std::vector<double>(size));
-    for(int i=0; i < size; i++) {
-        for(int j=0; j < size; j++) {
-
-            double coeff_sum = 0.0;
-
-            for(int k=0; k < size; k++) {
-                coeff_sum += A[i][k] * B[k][j];
-            }
-
-            C[i][j] = coeff_sum;
-
-        }
-    }
-
-    return C;
-}
-
-// Calcul du produit matriciel naif pour matrices de tailles différentes
-matrix_mod matprod_diff(const matrix_mod& A, const matrix_mod& B, int row_size1, int com_size, int col_size2) {
-    matrix_mod C(row_size1,std::vector<double>(col_size2));
-    for(int i=0; i < row_size1; i++) {
-        for(int j=0; j < col_size2; j++) {
-
-            double coeff_sum = 0.0;
-
-            for(int k=0; k < com_size; k++) {
-                coeff_sum += A[i][k] * B[k][j];
-            }
-
-            C[i][j] = coeff_sum;
-
-        }
-    }
-
-    return C;
-}
-
-// Calcul de la trace
-double trace(matrix_mod A, int size) {
-    double tr = 0.0;
-    for(int i=0; i < size; i++) {
-        tr += A[i][i];
-    }
-    return tr;
-}
-
-// Calcul de la transposée
-matrix_mod transpose(const matrix_mod& A, int row_size, int col_size) {
-    matrix_mod A_t(col_size, std::vector<double>(row_size));
-    for(int i=0; i < col_size; ++i) {
-        for(int j=0; j < row_size; j++) {
-            A_t[i][j] = A[j][i];
-        }
-    }
-    return A_t;
-}
-
-// Calcul du déterminant
-double det(matrix_mod A) {
-    double term1 = A[0][0] * A[1][1] * A[2][2];
-    double term2 = A[0][0] * A[1][2] * A[2][1];
-    double term3 = A[0][1] * A[1][2] * A[2][0];
-    double term4 = A[0][1] * A[1][0] * A[2][2];
-    double term5 = A[0][2] * A[1][0] * A[2][1];
-    double term6 = A[0][2] * A[1][1] * A[2][0];
-
-    return (term1-term2) + (term3-term4) + (term5-term6);
-}
-
-// std::cout << "Just checking\n";
-
-matrix_mod get_rot_matrix(const molecule_tab &mol1, const molecule_tab &mol2, int size) {
-
-    // Step 1
-    matrix_mod A(3,std::vector<double>(3));
-    A = matprod_diff(mol1,transpose(mol2,3,size),3,size,3);
-
-    // Step 2
-    double eigenval1;
-    double eigenval2;
-    double eigenval3;
-
-    matrix_mod prodAtA = matprod(transpose(A,3,3),A,3);
-
-    double a = -1.0;
-    double b = trace(prodAtA,3);
-    double c = -(1.0/2.0) * ( std::pow(trace(prodAtA,3),2) - trace(matprod(prodAtA,prodAtA,3),3));
-    double d = det(prodAtA);
-
-    double p = (3.0 * a * c - b * b) / (3.0 * a * a);
-    double q = (27.0 * a * a * d - 9.0 * a * b * c + 2.0 * pow(b,3)) / (27.0 * pow(a,3));
-    double r = std::sqrt(-std::pow(p / 3.0, 3.0));
-    double theta = (1.0/3.0) * std::acos(-q / (2*r));
-    
-    eigenval1 = (2 * std::cbrt(r) * std::cos(theta)) - (b/(3*a));
-    eigenval2 = (2 * std::cbrt(r) * std::cos(theta + 2 * M_PI / 3)) - (b/(3*a));
-    eigenval3 = (2 * std::cbrt(r) * std::cos(theta + 4 * M_PI / 3)) - (b/(3*a));
-
-
-    // Step 3
-    matrix_mod sigma = {{eigenval1, 0.0, 0.0}, {0.0, eigenval2, 0.0}, {0.0, 0.0, eigenval3}};
-
-    //Step 4
-    Eigen::MatrixXd ATA(3,3);
-    for(int i=0; i < 2; i++) {
-        for(int j=0; j < 2; j++) {
-            ATA(i,j) = prodAtA[i][j];
-        }   
-    }
-
-    // On réalise l'équivalent du Gaussian Elimination Method
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(ATA);
-
-    // Step 5, Eigenvector matrix
-    Eigen::MatrixXd V_eigen = es.eigenvectors();
-
-    std::vector<double> eigenvect1 = {V_eigen(0,0), V_eigen(1,0), V_eigen(2,0)};
-    std::vector<double> eigenvect2 = {V_eigen(0,1), V_eigen(1,1), V_eigen(2,1)};
-    std::vector<double> eigenvect3 = {V_eigen(0,2), V_eigen(1,2), V_eigen(2,2)};
-
-    matrix_mod V = {eigenvect1, eigenvect2, eigenvect3};
-
-    // Step 6
-    matrix_mod U = matprod(A,V,3);
-
-    for(int j=0; j < 3; j++) {
-        double sing_value = sigma[j][j];
-        if (sing_value == 0.0) {
-            U[j][0] = 0.0;
-            U[j][1] = 0.0;
-            U[j][2] = 0.0;
-        }
-        else {
-            for(int i=0; i < 3; i++) {
-                U[i][j] = U[i][j] / sing_value;
-            }
-        }
-    }
-
-    return U;
-}
-
-// Fonction qui calcule le vecteur multiplié par la matrice de rotation
-std::vector<double> rotated_vect(const matrix_mod& X, const matrix_mod& U, int size) {
-    matrix_mod Xtemp = matprod_diff(U,X,3,3,1);
-    std::vector<double> Xrot = {Xtemp[0][0], Xtemp[1][0], Xtemp[2][0]};
-    return Xrot;
-}
-
-// Fonction qui calcule la norme euclidienne au carrée entre deux vecteurs
-double sq_eucld_norm(std::vector<double> X, std::vector<double> Y) {
-    return std::pow(X[0] - Y[0],2) + std::pow(X[1] - Y[1],2) + std::pow(X[2] - Y[2],2);
-}
-
-// Fonction qui calcule la RMSD entre deux snapshots
-double calcul_RMSD(const molecule_tab& mol1, const molecule_tab& mol2, const matrix_mod &U, int size) {
-    double rmsd = 0.0;
-    for(int i=0; i < size; i++) {
-        matrix_mod Xi = {{mol1[0][i]}, {mol1[1][i]}, {mol1[2][i]}};
-        std::vector<double> Yi = {mol2[0][i], mol2[1][i], mol2[2][i]};
-
-        std::vector<double> Xirot = rotated_vect(Xi, U, size);
-
-        rmsd += sq_eucld_norm(Xirot, Yi);
-    }
-
-    rmsd = rmsd / size;
-    rmsd = std::sqrt(rmsd);
-
-    return rmsd;
-}
 
 // Fonction qui choisit un index proportionnellement à un certain poids
 int weighted_choice(const std::vector<double>& weights, std::mt19937_64& rng) {
@@ -250,9 +73,11 @@ std::vector<int> init_kmeanspp_centers(const snapshot_mod& snaps, int K, std::mt
 
     for (int c = 1; c < K; c++) {
         int lastCenter = centers.back();
+
+        // PARALLELISATION
+        #pragma omp parallel for schedule(dynamic, 32)
         for (int i = 0; i < N; i++) {
-            matrix_mod U = get_rot_matrix(snaps[i], snaps[lastCenter], N_atome);
-            double d = calcul_RMSD(snaps[i], snaps[lastCenter], U, N_atome);
+            double d = calcul_RMSD(snaps[i], snaps[lastCenter], N_atome);
             if (d < bestD[i]) {
                 bestD[i] = d;
             };
@@ -281,13 +106,14 @@ std::vector<int> assign_clusters(const snapshot_mod& snaps, const std::vector<in
     const int N_atome = (int)snaps[0][0].size();
     const int K = (int)centers.size();
     std::vector<int> labels(N, -1);
-
+    
+    // PARALLELISATION
+    #pragma omp parallel for schedule(dynamic, 32)
     for (int i = 0; i < N; i++) {
         double best = std::numeric_limits<double>::infinity();
         int bestk = -1;
         for (int k = 0; k < K; k++) {
-            matrix_mod U = get_rot_matrix(snaps[i], snaps[centers[k]], N_atome);
-            double d = calcul_RMSD(snaps[i], snaps[centers[k]], U, N_atome);
+            double d = calcul_RMSD(snaps[i], snaps[centers[k]], N_atome);
             if (d < best) {
                 best = d;
                 bestk = k;
@@ -316,6 +142,8 @@ std::vector<int> update_centers_by_subsample_medoid(const snapshot_mod& snaps, c
 
     std::vector<int> new_centers(K, 0);
 
+    // PARALLELISATION
+    #pragma omp parallel for schedule(dynamic, 1)
     for (int k = 0; k < K; k++) {
         auto& M = members[k];
         if (M.empty()) {
@@ -342,8 +170,7 @@ std::vector<int> update_centers_by_subsample_medoid(const snapshot_mod& snaps, c
         for (int cand : candidates) {
             double score = 0.0;
             for (int j : M) {
-                matrix_mod U = get_rot_matrix(snaps[cand], snaps[j], N_atome);
-                score += calcul_RMSD(snaps[cand], snaps[j], U, N_atome);
+                score += calcul_RMSD(snaps[cand], snaps[j], N_atome);
             }
             if (score < bestScore) {
                 bestScore = score;
@@ -366,18 +193,92 @@ bool centers_changed(const std::vector<int>& a, const std::vector<int>& b) {
     return false;
 }
 
+float daviesBouldinIndex(
+    snapshot_mod snaps,
+    int N_frames,
+    int N_atoms,
+    int K,
+    std::vector<int> clusters,
+    std::vector<int> centers
+) {
+    std::vector<float> S(K, 0.0f);
+    std::vector<int> counts(K, 0);
+
+    // --- Compute S_i (intra-cluster scatter)
+    for (int i = 0; i < N_frames; i++) {
+        int k = clusters[i];
+        // S[k] += rmsd[centroids[k] * N_frames + i];
+        S[k] += calcul_RMSD(snaps[centers[k]],snaps[i],N_atoms);
+        counts[k]++;
+    }
+
+    for (int k = 0; k < K; k++) {
+        if (counts[k] > 0)
+            S[k] /= counts[k];
+    }
+
+    // --- Compute DB
+    float db = 0.0f;
+
+    for (int i = 0; i < K; i++) {
+        float maxR = 0.0f;
+
+        for (int j = 0; j < K; j++) {
+            if (i == j) continue;
+
+            // float Mij = rmsd[centroids[i] * N_frames + centroids[j]];
+            float Mij = calcul_RMSD(snaps[centers[i]],snaps[centers[j]],N_atoms);
+            if (Mij > 0.0f) {
+                float Rij = (S[i] + S[j]) / Mij;
+                maxR = std::max(maxR, Rij);
+            }
+        }
+
+        db += maxR;
+    }
+
+    return db / K;
+}
+
 int main(int argc, char** argv) {
+
+    // Configuration OpenMP
+    int num_threads = 8;  
+    if (argc > 1) {
+        num_threads = std::atoi(argv[1]);
+    }
+    omp_set_num_threads(num_threads);
+    
+    std::cout << "Using " << num_threads << " OpenMP threads\n";
+    std::cout << "Max threads available: " << omp_get_max_threads() << "\n\n";
 
     int max_iters = 100;
     int num_test_points = 20;
 
-    int N_snap = 5000;
+    int N_snap = 15000;
     int K = 10;
-    int N_atome = 100;
+    int N_atome = 1000;
+
+    std::cout << "============Clustering sur " << N_snap << " molecules avec " << N_atome << " atomes.============\n";
+
+    // FileUtils file; 
+
+    // std::cout << file << std::endl;
+
+    // // size_t N_frames = file.getN_frames();
+    // size_t N_frames = 10000;
+    // size_t N_atoms  = file.getN_atoms();
+    // size_t N_dims   = file.getN_dims();
+
+    // // Load and reorder into X,Y,Z blocks
+    // float* frame = file.loadData(N_frames);
+    // file.reorderByLine(frame, N_frames);
 
     // Timers pour la mesure
     std::chrono::high_resolution_clock::time_point t0;
+    std::chrono::high_resolution_clock::time_point clust_t0;
     std::chrono::high_resolution_clock::time_point t1;
+    std::chrono::high_resolution_clock::time_point clust_t1;
 
     // On génère N snapshots aléatoires
     std::cout << "Generating snapshots..." << "\n";
@@ -415,6 +316,8 @@ int main(int argc, char** argv) {
 
     std::cout << "Beginning clustering\n";
 
+    clust_t0 = std::chrono::high_resolution_clock::now();
+
 
     for (int iter = 0; iter < max_iters; iter++) {
         t0 = std::chrono::high_resolution_clock::now();
@@ -430,12 +333,20 @@ int main(int argc, char** argv) {
         t1 = std::chrono::high_resolution_clock::now();
         std::cout << "Iteration done in " << std::chrono::duration<double>(t1-t0).count() << " seconds\n";
 
+        float dbi = daviesBouldinIndex(snaps, N_snap, N_atome, K, labels, centers);
+
+        std::cout << "Davies-Bouldin Index : " << dbi << "\n";  
+
         std::cout << "Iter " << iter << ": centers " << (changed ? "changed" : "unchanged") << "\n";
-        if (!changed || iter > 6) {
-            std::cout << "Converged. Clustering done.\n";
+        if (!changed || iter > max_iters) {
+            std::cout << "============CONVERGED. CLUSTERING DONE.============\n";
             break;
         }
     }
+
+    clust_t1 = std::chrono::high_resolution_clock::now();
+
+    std::cout << "Clustering done in " << std::chrono::duration<double>(clust_t1-clust_t0).count() << " seconds\n";
 
 
     return 0;

@@ -1,11 +1,6 @@
-// FileUtils.h
-
-#ifndef FILEUTILS_H
-#define FILEUTILS_H
+#pragma once
 
 #include <ostream>
-
-#pragma once
 #include <fstream>
 #include <vector>
 #include <iostream>
@@ -29,4 +24,9 @@ public:
     void reorderByLine(float* frame_data, const size_t n_subset_frames);
 };
 
-#endif
+// Cluster I/O
+void saveClusters(const int* clusters, int N_frames,
+                  const int* centroids, int K);
+
+std::vector<int> loadClusterLabels();
+std::vector<int> loadClusterCentroids();

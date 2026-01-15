@@ -15,7 +15,21 @@
 #include "gpu.cuh"
 #include <cuda_runtime.h>
 #include <stdio.h>
+#include <chrono>
+#include <iomanip>
 
+// alias for the clock type
+using chrono_time = std::chrono::_V2::high_resolution_clock;
+using chrono_type = std::chrono::_V2::high_resolution_clock::time_point;
+
+
+// Takes an std timestamp as start and a measurment title 
+// prints out [measurement] : now() - start to std::cout in seconds
+void measure_seconds(const chrono_type& start, const std::string& measurement) {
+    std::chrono::duration<float> elapsed = chrono_time::now()- start;
+    std::cout << std::left  << std::setw(30) << measurement << ": " 
+              << std::right << std::setw(10) << elapsed.count() << " s\n";
+}
 
 void pickRandomCentroids(int N_frames, int K, int* centroids) {
     // Create a vector with all frame indices
@@ -140,18 +154,16 @@ float daviesBouldinIndex(
 
 int main() {
 
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
+    // Time measurements
+    chrono_type global_start = chrono_time::now();
 
-    cudaEventRecord(start, 0);
 
     int K = 10;
     int MAX_ITER = 50;
 
     FileUtils file; 
 
-    std::cout << file << std::endl;
+    // std::cout << file << std::endl;
 
     size_t N_frames = file.getN_frames();
     // size_t N_frames = 10000;
@@ -164,20 +176,26 @@ int main() {
 
     size_t total_size = N_frames * N_atoms * N_dims * sizeof(float);    
 
+    measure_seconds(global_start, "Loading source data");
+
     // Copy reordered CPU → GPU
+    chrono_type mem_transfer_start = chrono_time::now();
     float* frameGPU;
-    cudaMalloc(&frameGPU, total_size);
-    cudaMemcpy(frameGPU, frame, total_size, cudaMemcpyHostToDevice);
+    CHECK_SUCCESS(cudaMalloc(&frameGPU, total_size), "Allocating frameGPU");
+    CHECK_SUCCESS(cudaMemcpy(frameGPU, frame, total_size, cudaMemcpyHostToDevice), "Memcpy frame -> frameGPU");
 
     // Load RMSD tab
     float* rmsd;
     size_t size_rmsd = N_frames * N_frames * sizeof(float);
-    cudaMalloc(&rmsd, size_rmsd);
+    CHECK_SUCCESS(cudaMalloc(&rmsd, size_rmsd), "Allocating rmsd vector on GPU");
+
+    cudaDeviceSynchronize();
+    measure_seconds(mem_transfer_start, "CPU to GPU memory transfer");
 
     dim3 threads(256,1);
     dim3 blocks((N_frames + threads.x - 1) / threads.x, (N_frames + threads.y - 1) / threads.y);
 
-    std::cout << "Kernel Start" << std::endl;
+    chrono_type rmsd_kernel_start = chrono_time::now();
     RMSD<<<blocks, threads>>>(
         frameGPU,
         N_frames,
@@ -185,11 +203,12 @@ int main() {
         rmsd
     );
     cudaDeviceSynchronize();
-    std::cout << "Kernel Finished" << std::endl;
+    measure_seconds(rmsd_kernel_start, "RMSD Kernel");
 
     float* rmsdHost = new float[N_frames*N_frames];
-    cudaMemcpy(rmsdHost, rmsd, size_rmsd, cudaMemcpyDeviceToHost);
+    CHECK_SUCCESS(cudaMemcpy(rmsdHost, rmsd, size_rmsd, cudaMemcpyDeviceToHost), "Memcpy rmsd -> rmsdHost");
 
+    chrono_type clustering_loop_start = chrono_time::now();
     // Pick first K unique indices
     int* centroids = new int[K];
     pickRandomCentroids(N_frames, K, centroids);
@@ -210,6 +229,8 @@ int main() {
         // Define new centroids
         updateCentroids(N_frames, K, clusters, rmsdHost, centroids);
     }
+    measure_seconds(clustering_loop_start, "Clustering loop");
+    measure_seconds(global_start, "Entire program");
 
     std::cout << "Final centroids: " << std::endl;
     for (int i=0; i<K; i++) {
@@ -242,6 +263,7 @@ int main() {
 
     std::cout << "Random Davies–Bouldin index: " << db << std::endl;
 
+    saveClusters(clusters, N_frames, centroids, K);
 
     // Cleanup
     delete[] frame;
@@ -250,15 +272,6 @@ int main() {
     delete[] clusters;
     cudaFree(frameGPU);
     cudaFree(rmsd);
-
-    cudaEventRecord(stop, 0);
-
-    cudaEventSynchronize(stop);
-
-    float elapsed_ms = 0.0f;
-    cudaEventElapsedTime(&elapsed_ms, start, stop);
-
-    printf("Main time execution: %.1f s\n", elapsed_ms/1000.0f);
 
     return 0;
 }

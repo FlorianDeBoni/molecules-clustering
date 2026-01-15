@@ -8,7 +8,7 @@ GPUCC = nvcc
 # CUDA_TARGET_FLAGS = -arch=sm_86      # RTX 3080
 
 # Compiler flags
-CXXFLAGS = -DDP -I. -I./lib -I/usr/local/cuda/include -I/usr/include/x86_64-linux-gnu
+CXXFLAGS = -DDP -I. -I./lib -I/usr/include/x86_64-linux-gnu
 
 CXXFLAGS += -O3 -I./chemfiles/include -I./chemfiles/build/include 
 CUDA_CXXFLAGS = -O3 $(CUDA_TARGET_FLAGS)
@@ -39,21 +39,21 @@ OBJECT_DIR = objects
 EXECNAME = main
 
 all: $(CHEMFILES_BUILD_DIR)/libchemfiles.a $(EXECNAME)
-	./$(EXECNAME)
+	@./$(EXECNAME)
 
 # Linking Rule
 $(EXECNAME): $(CC_OBJECTS) $(CUDA_OBJECTS) $(BIN_FILE)
-	$(CPUCC) -o $(EXECNAME) $(CC_OBJECTS) $(CUDA_OBJECTS) $(CC_LDFLAGS) $(CUDA_LDFLAGS) $(CUDA_LIBS)
+	@$(CPUCC) -o $(EXECNAME) $(CC_OBJECTS) $(CUDA_OBJECTS) $(CC_LDFLAGS) $(CUDA_LDFLAGS) $(CUDA_LIBS)
 
 # C++ Compilation Rule
 $(OBJECT_DIR)/%.o: %.cpp
 	@mkdir -p $(dir $@)
-	$(CPUCC) -c $< $(CXXFLAGS) -o $@
+	@$(CPUCC) -c $< $(CXXFLAGS) -o $@
 
 # GPU Compilation Rule
 $(OBJECT_DIR)/%.o: %.cu
 	@mkdir -p $(dir $@)
-	$(GPUCC) -c $< $(CUDA_CXXFLAGS) -Xcompiler "$(CXXFLAGS)" -o $@
+	@$(GPUCC) -c $< $(CUDA_CXXFLAGS) -Xcompiler "$(CXXFLAGS)" -o $@
 
 
 # Chemfiles build rule

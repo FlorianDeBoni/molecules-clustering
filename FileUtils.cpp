@@ -4,6 +4,9 @@
 #include <stdexcept>
 #include <vector>
 #include <string.h>
+#include <chrono>
+#include <sstream>
+#include <iomanip>
 
 FileUtils::FileUtils() 
     : file("output/snapshots_coords.bin", std::ios::binary) 
@@ -148,3 +151,77 @@ float* FileUtils::loadData(size_t n_subset_frames) {
     return data;
 }
 
+
+/*
+* Writes clustering result's centroid and cluster indices into a binary file.
+* These indices are used to read actual molecule shapes 
+* stored in the original dataset file.
+* The file layout is as follows:
+* - Metadata: sizeof(int) bytes storing K | sizeof(int) bytes storing N_frames
+* - Data: K*sizeof(int) bytes storing centroids indices | N_frames*sizeof(int) bytes storing cluster
+* indices of each frame
+*/
+void saveClusters(const int* clusters, int N_frames, const int* centroids, int K) {
+    std::ofstream outFile("output/clusters.bin", std::ios::binary);
+    
+    if (outFile.is_open()) {
+        // metadata
+        outFile.write(reinterpret_cast<const char*>(&K), sizeof(int));
+        outFile.write(reinterpret_cast<const char*>(&N_frames), sizeof(int));
+
+        // Write the arrays
+        outFile.write(reinterpret_cast<const char*>(centroids), K * sizeof(int));
+        outFile.write(reinterpret_cast<const char*>(clusters), N_frames * sizeof(int));
+        
+        outFile.close();
+    }
+
+    std::cout << "Results saved to output/clusters.bin\n";
+}
+
+/*
+* Loads cluster labels from the clusters.bin file.
+* returns a vector<int> of size N_frames that was saved in the file.
+*/
+std::vector<int> loadClusterLabels() {
+    std::ifstream inFile("output/clusters.bin", std::ios::binary);
+    if (!inFile) return {};
+
+    int K, N_frames;
+
+    // Read metadata
+    inFile.read(reinterpret_cast<char*>(&K), sizeof(int));
+    inFile.read(reinterpret_cast<char*>(&N_frames), sizeof(int));
+
+    // Skip centroids
+    inFile.seekg(K * sizeof(int), std::ios::cur);
+
+    // Read labels
+    std::vector<int> labels(N_frames);
+    inFile.read(reinterpret_cast<char*>(labels.data()),
+                N_frames * sizeof(int));
+
+    return labels;
+}
+
+/*
+* Loads cluster centroids from the clusters.bin file.
+* returns a vector<int> of size K that was saved in the file.
+*/
+std::vector<int> loadClusterCentroids() {
+    std::ifstream inFile("output/clusters.bin", std::ios::binary);
+    if (!inFile) return {};
+
+    int K, N_frames;
+
+    // Read metadata
+    inFile.read(reinterpret_cast<char*>(&K), sizeof(int));
+    inFile.read(reinterpret_cast<char*>(&N_frames), sizeof(int));
+
+    // Read centroids
+    std::vector<int> centroids(K);
+    inFile.read(reinterpret_cast<char*>(centroids.data()),
+                K * sizeof(int));
+
+    return centroids;
+}

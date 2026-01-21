@@ -226,7 +226,8 @@ int main() {
 
     std::cout << file << std::endl;
 
-    size_t N_frames = 25000;
+    size_t N_frames = 30000;
+    // size_t N_frames = file.getN_frames();
     size_t N_atoms  = file.getN_atoms();
     size_t N_dims   = file.getN_dims();
 

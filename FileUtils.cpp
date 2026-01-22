@@ -4,15 +4,12 @@
 #include <stdexcept>
 #include <vector>
 #include <string.h>
-#include <chrono>
-#include <sstream>
-#include <iomanip>
 
 FileUtils::FileUtils() 
-    : file("output/snapshots_coords.bin", std::ios::binary) 
+    : file("output/snapshots_coords_all.bin", std::ios::binary) 
 {
     if (!file.is_open()) {
-        throw std::runtime_error("Failed to open output/snapshots_coords.bin");
+        throw std::runtime_error("Failed to open output/snapshots_coords_all.bin");
     }
 
     // Read header information
@@ -21,8 +18,11 @@ FileUtils::FileUtils()
     file.read(reinterpret_cast<char*>(&n_dims), sizeof(size_t));
 
     if (!file) {
-        throw std::runtime_error("Error reading header from snapshots_coords.bin");
+        throw std::runtime_error("Error reading header from snapshots_coords_all.bin");
     }
+    
+    std::cout << "Loaded binary file: " << n_frames << " frames, " 
+              << n_atoms << " atoms, " << n_dims << " dimensions" << std::endl;
 }
 
 size_t FileUtils::getN_atoms() const { return n_atoms; }
@@ -37,8 +37,16 @@ std::ostream& operator<<(std::ostream& os, const FileUtils& f) {
     std::ifstream& file = f.getFile();
 
     std::vector<float> frame_data(n_atoms * n_dims);
+    
+    // Frame 1 (index 0)
+    file.clear();  // Clear any error flags
     file.seekg(3 * sizeof(size_t) + 0 * n_atoms * n_dims * sizeof(float), std::ios::beg);
     file.read(reinterpret_cast<char*>(frame_data.data()), n_atoms * n_dims * sizeof(float));
+    
+    if (!file) {
+        os << "Error reading frame 1" << std::endl;
+        return os;
+    }
     
     os << "Snapshot 1:" << std::endl
        << "Atom 1: (" << frame_data[0 * n_dims + 0] << ", " << frame_data[0 * n_dims + 1] << ", " << frame_data[0 * n_dims + 2] << ")" << std::endl
@@ -46,32 +54,64 @@ std::ostream& operator<<(std::ostream& os, const FileUtils& f) {
        << "..." << std::endl
        << "Atom " << n_atoms << ": (" << frame_data[(n_atoms-1) * n_dims + 0] << ", " << frame_data[(n_atoms-1) * n_dims + 1] << ", " << frame_data[(n_atoms-1) * n_dims + 2] << ")" << std::endl << std::endl;
     
-    file.seekg(3 * sizeof(size_t) + 1 * n_atoms * n_dims * sizeof(float), std::ios::beg);
-    file.read(reinterpret_cast<char*>(frame_data.data()), n_atoms * n_dims * sizeof(float));
+    // Frame 2 (index 1)
+    if (n_frames > 1) {
+        file.clear();
+        file.seekg(3 * sizeof(size_t) + 1 * n_atoms * n_dims * sizeof(float), std::ios::beg);
+        file.read(reinterpret_cast<char*>(frame_data.data()), n_atoms * n_dims * sizeof(float));
+        
+        if (!file) {
+            os << "Error reading frame 2" << std::endl;
+            return os;
+        }
 
-    os << "Snapshot 2:" << std::endl
-       << "Atom 1: (" << frame_data[0 * n_dims + 0] << ", " << frame_data[0 * n_dims + 1] << ", " << frame_data[0 * n_dims + 2] << ")" << std::endl
-       << "Atom 2: (" << frame_data[1 * n_dims + 0] << ", " << frame_data[1 * n_dims + 1] << ", " << frame_data[1 * n_dims + 2] << ")" << std::endl
-       << "..." << std::endl
-       << "Atom " << n_atoms << ": (" << frame_data[(n_atoms-1) * n_dims + 0] << ", " << frame_data[(n_atoms-1) * n_dims + 1] << ", " << frame_data[(n_atoms-1) * n_dims + 2] << ")" << std::endl << std::endl;
-    os << "..." << std::endl << std::endl;
+        os << "Snapshot 2:" << std::endl
+           << "Atom 1: (" << frame_data[0 * n_dims + 0] << ", " << frame_data[0 * n_dims + 1] << ", " << frame_data[0 * n_dims + 2] << ")" << std::endl
+           << "Atom 2: (" << frame_data[1 * n_dims + 0] << ", " << frame_data[1 * n_dims + 1] << ", " << frame_data[1 * n_dims + 2] << ")" << std::endl
+           << "..." << std::endl
+           << "Atom " << n_atoms << ": (" << frame_data[(n_atoms-1) * n_dims + 0] << ", " << frame_data[(n_atoms-1) * n_dims + 1] << ", " << frame_data[(n_atoms-1) * n_dims + 2] << ")" << std::endl << std::endl;
+        os << "..." << std::endl << std::endl;
+    }
 
-    file.seekg(3 * sizeof(size_t) + n_frames * n_atoms * n_dims * sizeof(float), std::ios::beg);
-    file.read(reinterpret_cast<char*>(frame_data.data()), n_atoms * n_dims * sizeof(float));
+    // Last frame (index n_frames - 1)
+    if (n_frames > 0) {
+        file.clear();
+        file.seekg(3 * sizeof(size_t) + (n_frames - 1) * n_atoms * n_dims * sizeof(float), std::ios::beg);
+        file.read(reinterpret_cast<char*>(frame_data.data()), n_atoms * n_dims * sizeof(float));
+        
+        if (!file) {
+            os << "Error reading last frame" << std::endl;
+            return os;
+        }
 
-    os << "Snapshot " << n_frames << ":" << std::endl
-       << "Atom 1: (" << frame_data[0 * n_dims + 0] << ", " << frame_data[0 * n_dims + 1] << ", " << frame_data[0 * n_dims + 2] << ")" << std::endl
-       << "Atom 2: (" << frame_data[1 * n_dims + 0] << ", " << frame_data[1 * n_dims + 1] << ", " << frame_data[1 * n_dims + 2] << ")" << std::endl
-       << "..." << std::endl
-       << "Atom " << n_atoms << ": (" << frame_data[(n_atoms-1) * n_dims + 0] << ", " << frame_data[(n_atoms-1) * n_dims + 1] << ", " << frame_data[(n_atoms-1) * n_dims + 2] << ")";
+        os << "Snapshot " << n_frames << ":" << std::endl
+           << "Atom 1: (" << frame_data[0 * n_dims + 0] << ", " << frame_data[0 * n_dims + 1] << ", " << frame_data[0 * n_dims + 2] << ")" << std::endl
+           << "Atom 2: (" << frame_data[1 * n_dims + 0] << ", " << frame_data[1 * n_dims + 1] << ", " << frame_data[1 * n_dims + 2] << ")" << std::endl
+           << "..." << std::endl
+           << "Atom " << n_atoms << ": (" << frame_data[(n_atoms-1) * n_dims + 0] << ", " << frame_data[(n_atoms-1) * n_dims + 1] << ", " << frame_data[(n_atoms-1) * n_dims + 2] << ")";
+    }
+    
     return os;
 }
 
 std::vector<float> FileUtils::readFrame(size_t frame_idx) {
+    if (frame_idx >= n_frames) {
+        throw std::out_of_range("Frame index " + std::to_string(frame_idx) + 
+                                " out of range [0, " + std::to_string(n_frames) + ")");
+    }
 
     std::vector<float> frame_data(n_atoms * n_dims);
-    file.seekg(3 * sizeof(size_t) + 0 * n_atoms * n_dims * sizeof(float), std::ios::beg);
+    
+    // Clear any error flags before seeking
+    file.clear();
+    
+    // Seek to the correct frame (was always reading frame 0!)
+    file.seekg(3 * sizeof(size_t) + frame_idx * n_atoms * n_dims * sizeof(float), std::ios::beg);
     file.read(reinterpret_cast<char*>(frame_data.data()), n_atoms * n_dims * sizeof(float));
+
+    if (!file) {
+        throw std::runtime_error("Error reading frame " + std::to_string(frame_idx));
+    }
 
     return frame_data;
 }
@@ -124,15 +164,22 @@ void FileUtils::reorderByLine(float* frame_data, const size_t n_subset_frames) {
 */
 float* FileUtils::loadData(size_t n_subset_frames) {
     if (n_subset_frames > n_frames) {
-        std::cerr << "Error: number of frames requested " << n_subset_frames << " > " << n_frames << std::endl;
-        exit(1);
+        std::cerr << "Error: number of frames requested " << n_subset_frames 
+                  << " > " << n_frames << std::endl;
+        throw std::invalid_argument("Requested frames exceed available frames");
+    }
+    
+    if (n_subset_frames == 0) {
+        std::cerr << "Error: cannot load 0 frames" << std::endl;
+        throw std::invalid_argument("n_subset_frames must be > 0");
     }
 
     size_t n_elements = n_subset_frames * n_atoms * n_dims;
     float* data = new (std::nothrow) float[n_elements];
     if (!data) {
-        std::cerr << "Error allocating " << n_elements * sizeof(float) / (1024*1024) << " Mb" << std::endl;
-        exit(1);
+        std::cerr << "Error allocating " << n_elements * sizeof(float) / (1024*1024) 
+                  << " MB" << std::endl;
+        throw std::bad_alloc();
     }
 
     // Reset file state and seek to data start
@@ -142,86 +189,17 @@ float* FileUtils::loadData(size_t n_subset_frames) {
     file.read(reinterpret_cast<char*>(data), n_elements * sizeof(float));
     if (!file) {
         std::cerr << "Error reading frame data from file" << std::endl;
+        std::cerr << "Attempted to read " << n_elements * sizeof(float) / (1024*1024) 
+                  << " MB" << std::endl;
+        std::cerr << "File state - fail: " << file.fail() 
+                  << ", eof: " << file.eof() 
+                  << ", bad: " << file.bad() << std::endl;
         delete[] data;
-        exit(1);
+        throw std::runtime_error("Failed to read frame data");
     }
 
-    std::cout << "Successfully Loaded " << n_elements * sizeof(float) / (1024*1024) << " Mb" << std::endl;
+    std::cout << "Successfully loaded " << n_elements * sizeof(float) / (1024*1024) 
+              << " MB (" << n_subset_frames << " frames)" << std::endl;
 
     return data;
-}
-
-
-/*
-* Writes clustering result's centroid and cluster indices into a binary file.
-* These indices are used to read actual molecule shapes 
-* stored in the original dataset file.
-* The file layout is as follows:
-* - Metadata: sizeof(int) bytes storing K | sizeof(int) bytes storing N_frames
-* - Data: K*sizeof(int) bytes storing centroids indices | N_frames*sizeof(int) bytes storing cluster
-* indices of each frame
-*/
-void saveClusters(const int* clusters, int N_frames, const int* centroids, int K) {
-    std::ofstream outFile("output/clusters.bin", std::ios::binary);
-    
-    if (outFile.is_open()) {
-        // metadata
-        outFile.write(reinterpret_cast<const char*>(&K), sizeof(int));
-        outFile.write(reinterpret_cast<const char*>(&N_frames), sizeof(int));
-
-        // Write the arrays
-        outFile.write(reinterpret_cast<const char*>(centroids), K * sizeof(int));
-        outFile.write(reinterpret_cast<const char*>(clusters), N_frames * sizeof(int));
-        
-        outFile.close();
-    }
-
-    std::cout << "Results saved to output/clusters.bin\n";
-}
-
-/*
-* Loads cluster labels from the clusters.bin file.
-* returns a vector<int> of size N_frames that was saved in the file.
-*/
-std::vector<int> loadClusterLabels() {
-    std::ifstream inFile("output/clusters.bin", std::ios::binary);
-    if (!inFile) return {};
-
-    int K, N_frames;
-
-    // Read metadata
-    inFile.read(reinterpret_cast<char*>(&K), sizeof(int));
-    inFile.read(reinterpret_cast<char*>(&N_frames), sizeof(int));
-
-    // Skip centroids
-    inFile.seekg(K * sizeof(int), std::ios::cur);
-
-    // Read labels
-    std::vector<int> labels(N_frames);
-    inFile.read(reinterpret_cast<char*>(labels.data()),
-                N_frames * sizeof(int));
-
-    return labels;
-}
-
-/*
-* Loads cluster centroids from the clusters.bin file.
-* returns a vector<int> of size K that was saved in the file.
-*/
-std::vector<int> loadClusterCentroids() {
-    std::ifstream inFile("output/clusters.bin", std::ios::binary);
-    if (!inFile) return {};
-
-    int K, N_frames;
-
-    // Read metadata
-    inFile.read(reinterpret_cast<char*>(&K), sizeof(int));
-    inFile.read(reinterpret_cast<char*>(&N_frames), sizeof(int));
-
-    // Read centroids
-    std::vector<int> centroids(K);
-    inFile.read(reinterpret_cast<char*>(centroids.data()),
-                K * sizeof(int));
-
-    return centroids;
 }

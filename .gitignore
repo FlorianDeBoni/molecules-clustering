@@ -2,6 +2,9 @@ dataset*
 output*
 chemfiles*
 md_reader
+md_reader_legacy
 reading_coordinates
 objects
 main
+.vscode
+chemfiles/*

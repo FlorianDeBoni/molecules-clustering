@@ -227,7 +227,7 @@ int main() {
 
     std::cout << file << std::endl;
 
-    size_t N_frames = 40000;
+    size_t N_frames = 20000;
     // size_t N_frames = file.getN_frames();
     size_t N_atoms  = file.getN_atoms();
     size_t N_dims   = file.getN_dims();
@@ -332,18 +332,39 @@ int main() {
     
     std::cout << std::fixed << std::setprecision(6);
 
+    int NUM_TRIALS = 5; // Number of K-medoids runs per K to pick the best
+
     for (int K = K_MIN; K <= K_MAX; ++K) {
-        // Run K-medoids clustering
-        float db_km = runKMedoids(N_frames, K, rmsdHost, MAX_ITER);
+        float best_db_km = 1e30f;
+        int* best_centroids = new int[K];
+        int* best_clusters  = new int[N_frames];
+
+        // Repeat K-medoids multiple times
+        for (int trial = 0; trial < NUM_TRIALS; ++trial) {
+            int* temp_centroids = new int[K];
+            int* temp_clusters  = new int[N_frames];
+
+            float db_km_trial = runKMedoids(N_frames, K, rmsdHost, MAX_ITER, temp_centroids, temp_clusters);
+
+            if (db_km_trial < best_db_km) {
+                best_db_km = db_km_trial;
+                memcpy(best_centroids, temp_centroids, K * sizeof(int));
+                memcpy(best_clusters, temp_clusters, N_frames * sizeof(int));
+            }
+
+            delete[] temp_centroids;
+            delete[] temp_clusters;
+        }
 
         // Run random clustering baseline
         float db_rand = runRandomClustering(N_frames, K, rmsdHost);
 
-        float diff = db_rand - db_km;
+        float diff = db_rand - best_db_km;
 
+        // Print nicely formatted output
         std::cout
             << std::setw(4)  << K
-            << std::setw(16) << db_km
+            << std::setw(16) << best_db_km
             << std::setw(16) << db_rand
             << std::setw(16) << diff
             << std::setw(14) << (diff > 0 ? "Better" : "Worse")
@@ -351,9 +372,13 @@ int main() {
 
         // Store results
         K_values.push_back(K);
-        db_kmedoids.push_back(db_km);
+        db_kmedoids.push_back(best_db_km);
         db_random.push_back(db_rand);
+
+        delete[] best_centroids;
+        delete[] best_clusters;
     }
+
 
     
     std::cout << std::string(70, '=') << std::endl;

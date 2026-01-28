@@ -282,5 +282,3 @@ void RMSD(
     out[ref_idx*N_frames + snap] = rmsd;
     out[snap*N_frames + ref_idx] = rmsd; // symmetric
 }
-
-

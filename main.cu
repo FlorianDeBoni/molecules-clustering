@@ -156,22 +156,25 @@ float daviesBouldinIndex(
 }
 
 // Run K-medoids clustering and return DB index
-float runKMedoids(int N_frames, int K, const float* rmsdHost, 
-                  int MAX_ITER, int* final_centroids = nullptr, 
-                  int* final_clusters = nullptr) {
+float runKMedoidsInit(int N_frames, int K, const float* rmsdHost,
+                      int MAX_ITER,
+                      const int* init_centroids,
+                      int* final_centroids,
+                      int* final_clusters)
+{
     int* centroids = new int[K];
-    int* clusters = new int[N_frames];
-    
-    pickKMedoidsPlusPlus(N_frames, K, rmsdHost, centroids);
-    
+    int* clusters  = new int[N_frames];
+
+    memcpy(centroids, init_centroids, K * sizeof(int));
+
     for (int iter = 0; iter < MAX_ITER; iter++) {
         createClusters(N_frames, K, rmsdHost, centroids, clusters);
-        
+
         int* old_centroids = new int[K];
         memcpy(old_centroids, centroids, K * sizeof(int));
-        
+
         updateCentroids(N_frames, K, clusters, rmsdHost, centroids);
-        
+
         bool converged = true;
         for (int k = 0; k < K; k++) {
             if (centroids[k] != old_centroids[k]) {
@@ -179,44 +182,33 @@ float runKMedoids(int N_frames, int K, const float* rmsdHost,
                 break;
             }
         }
-        
+
         delete[] old_centroids;
-        
         if (converged) break;
     }
-    
+
     float db = daviesBouldinIndex(N_frames, K, clusters, centroids, rmsdHost);
-    
-    // Copy results if requested
-    if (final_centroids != nullptr) {
-        memcpy(final_centroids, centroids, K * sizeof(int));
-    }
-    if (final_clusters != nullptr) {
-        memcpy(final_clusters, clusters, N_frames * sizeof(int));
-    }
-    
+
+    memcpy(final_centroids, centroids, K * sizeof(int));
+    memcpy(final_clusters,  clusters,  N_frames * sizeof(int));
+
     delete[] centroids;
     delete[] clusters;
-    
+
     return db;
 }
 
+
 // Run random clustering and return DB index
-float runRandomClustering(int N_frames, int K, const float* rmsdHost) {
-    int* centroids = new int[K];
+float runRandomFromInit(int N_frames, int K, const float* rmsdHost,
+                        const int* init_centroids)
+{
     int* clusters = new int[N_frames];
-    
-    pickKMedoidsPlusPlus(N_frames, K, rmsdHost, centroids);
-    for (int i = 0; i < N_frames; i++) {
-        clusters[i] = rand() % K;
-    }
-    createClusters(N_frames, K, rmsdHost, centroids, clusters);
-    
-    float db = daviesBouldinIndex(N_frames, K, clusters, centroids, rmsdHost);
-    
-    delete[] centroids;
+
+    createClusters(N_frames, K, rmsdHost, init_centroids, clusters);
+    float db = daviesBouldinIndex(N_frames, K, clusters, init_centroids, rmsdHost);
+
     delete[] clusters;
-    
     return db;
 }
 
@@ -228,9 +220,10 @@ int main() {
     CUDA_CHECK(cudaEventCreate(&evTotalStart));
     CUDA_CHECK(cudaEventCreate(&evTotalStop));
 
-    int MAX_ITER = 50;
-    int K_MIN = 2;
-    int K_MAX = 50;
+    const int MAX_ITER = 50;
+    const int K_MIN = 2;
+    const int K_MAX = 50;
+    const int NB_TRIAL = 5;
 
     FileUtils file; 
 
@@ -282,6 +275,7 @@ int main() {
     float t_kernel = 0.f;
     CUDA_CHECK(cudaEventRecord(evStart));
     RMSD<<<blocks, threads>>>(frameGPU, N_frames, N_atoms, rmsd);
+
     CUDA_CHECK(cudaEventRecord(evStop));
 
     CUDA_CHECK(cudaGetLastError());
@@ -341,48 +335,63 @@ int main() {
     
     std::cout << std::fixed << std::setprecision(6);
 
-    int NUM_TRIALS = 5; // Number of K-medoids runs per K to pick the best
 
     for (int K = K_MIN; K <= K_MAX; ++K) {
         float best_db_km = 1e30f;
+        float best_rd_db_km = 1e30f;
+
         int* best_centroids = new int[K];
         int* best_clusters  = new int[N_frames];
 
-        // Repeat K-medoids multiple times
-        for (int trial = 0; trial < NUM_TRIALS; ++trial) {
-            int* temp_centroids = new int[K];
-            int* temp_clusters  = new int[N_frames];
+        for (int trial = 0; trial < NB_TRIAL; trial++) {
 
-            float db_km_trial = runKMedoids(N_frames, K, rmsdHost, MAX_ITER, temp_centroids, temp_clusters);
+            int* init_centroids = new int[K];
+            int* km_centroids   = new int[K];
+            int* km_clusters    = new int[N_frames];
+
+            pickKMedoidsPlusPlus(N_frames, K, rmsdHost, init_centroids);
+
+            float db_km_trial = runKMedoidsInit(
+                N_frames, K, rmsdHost, MAX_ITER,
+                init_centroids,
+                km_centroids,
+                km_clusters
+            );
 
             if (db_km_trial < best_db_km) {
                 best_db_km = db_km_trial;
-                memcpy(best_centroids, temp_centroids, K * sizeof(int));
-                memcpy(best_clusters, temp_clusters, N_frames * sizeof(int));
+                memcpy(best_centroids, km_centroids, K * sizeof(int));
+                memcpy(best_clusters, km_clusters, N_frames * sizeof(int));
             }
 
-            delete[] temp_centroids;
-            delete[] temp_clusters;
+            float db_rand = runRandomFromInit(N_frames, K, rmsdHost, init_centroids);
+
+            if (db_rand < best_rd_db_km) {
+                best_rd_db_km = db_rand;
+            }
+
+            delete[] init_centroids;
+            delete[] km_centroids;
+            delete[] km_clusters;
         }
 
-        // Run random clustering baseline
-        float db_rand = runRandomClustering(N_frames, K, rmsdHost);
 
-        float diff = db_rand - best_db_km;
+        float diff = best_rd_db_km - best_db_km;
 
         // Print nicely formatted output
         std::cout
             << std::setw(4)  << K
             << std::setw(16) << best_db_km
-            << std::setw(16) << db_rand
+            << std::setw(16) << best_rd_db_km
             << std::setw(16) << diff
             << std::setw(14) << (diff > 0 ? "Better" : "Worse")
             << '\n';
 
+
         // Store results
         K_values.push_back(K);
         db_kmedoids.push_back(best_db_km);
-        db_random.push_back(db_rand);
+        db_random.push_back(best_rd_db_km);
 
         delete[] best_centroids;
         delete[] best_clusters;
@@ -452,9 +461,15 @@ int main() {
     int* final_centroids = new int[optimal_K_db];
     int* final_clusters = new int[N_frames];
     
-    float final_db = runKMedoids(N_frames, optimal_K_db, rmsdHost, MAX_ITER, 
-                                  final_centroids, final_clusters);
-    
+    pickKMedoidsPlusPlus(N_frames, optimal_K_db, rmsdHost, final_centroids);
+
+    float final_db = runKMedoidsInit(
+        N_frames, optimal_K_db, rmsdHost, MAX_ITER,
+        final_centroids,
+        final_centroids,
+        final_clusters
+    );
+
     std::cout << "\nFinal centroids (frame indices):" << std::endl;
     for (int k = 0; k < optimal_K_db; k++) {
         std::cout << "  Cluster " << k << ": frame " << final_centroids[k] << std::endl;

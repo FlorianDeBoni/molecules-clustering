@@ -31,24 +31,33 @@ do { \
 } while(0)
 
 
-void pickRandomCentroids(int N_frames, int K, int* centroids) {
-    int* indices = new int[N_frames];
-    for (int i = 0; i < N_frames; i++) indices[i] = i;
-
+void pickKMedoidsPlusPlus(int N_frames, int K, const float* rmsd, int* centroids) {
     std::random_device rd;
-    std::mt19937 g(rd());
+    std::mt19937 gen(rd());
 
-    for (size_t i = N_frames - 1; i > 0; --i) {
-        std::uniform_int_distribution<size_t> dist(0, i);
-        size_t j = dist(g);
-        std::swap(indices[i], indices[j]);
+    std::uniform_int_distribution<int> dist0(0, N_frames-1);
+    centroids[0] = dist0(gen);
+
+    std::vector<float> minDist(N_frames, 1e30f);
+
+    for (int k = 1; k < K; ++k) {
+        for (int i = 0; i < N_frames; ++i) {
+            float d = rmsd[centroids[k-1] * N_frames + i];
+            if (d < minDist[i]) minDist[i] = d;
+        }
+
+        // Compute cumulative probability
+        std::vector<float> cumulative(N_frames, 0.0f);
+        cumulative[0] = minDist[0];
+        for (int i = 1; i < N_frames; ++i) cumulative[i] = cumulative[i-1] + minDist[i];
+
+        std::uniform_real_distribution<float> dist(0, cumulative[N_frames-1]);
+        float r = dist(gen);
+
+        // Pick next centroid
+        auto it = std::lower_bound(cumulative.begin(), cumulative.end(), r);
+        centroids[k] = std::distance(cumulative.begin(), it);
     }
-
-    for (int k = 0; k<K; k++) {
-        centroids[k] = indices[k];
-    }
-
-    delete[] indices;
 }
 
 void createClusters(
@@ -153,7 +162,7 @@ float runKMedoids(int N_frames, int K, const float* rmsdHost,
     int* centroids = new int[K];
     int* clusters = new int[N_frames];
     
-    pickRandomCentroids(N_frames, K, centroids);
+    pickKMedoidsPlusPlus(N_frames, K, rmsdHost, centroids);
     
     for (int iter = 0; iter < MAX_ITER; iter++) {
         createClusters(N_frames, K, rmsdHost, centroids, clusters);
@@ -197,7 +206,7 @@ float runRandomClustering(int N_frames, int K, const float* rmsdHost) {
     int* centroids = new int[K];
     int* clusters = new int[N_frames];
     
-    pickRandomCentroids(N_frames, K, centroids);
+    pickKMedoidsPlusPlus(N_frames, K, rmsdHost, centroids);
     for (int i = 0; i < N_frames; i++) {
         clusters[i] = rand() % K;
     }

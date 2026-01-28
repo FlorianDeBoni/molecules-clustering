@@ -200,15 +200,36 @@ float runKMedoidsInit(int N_frames, int K, const float* rmsdHost,
 
 
 // Run random clustering and return DB index
-float runRandomFromInit(int N_frames, int K, const float* rmsdHost,
-                        const int* init_centroids)
+float runRandomClusterAssignment(int N_frames, int K, const float* rmsdHost)
 {
-    int* clusters = new int[N_frames];
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<int> dist(0, K-1);
 
-    createClusters(N_frames, K, rmsdHost, init_centroids, clusters);
-    float db = daviesBouldinIndex(N_frames, K, clusters, init_centroids, rmsdHost);
+    int* clusters = new int[N_frames];
+    for (int i = 0; i < N_frames; i++)
+        clusters[i] = dist(gen);  // assign frame i to a random cluster
+
+    // Compute a “dummy” centroid for DB index: pick any frame in each cluster
+    int* centroids = new int[K];
+    for (int k = 0; k < K; k++)
+    {
+        centroids[k] = -1;
+        for (int i = 0; i < N_frames; i++)
+        {
+            if (clusters[i] == k)
+            {
+                centroids[k] = i;
+                break;
+            }
+        }
+        if (centroids[k] == -1) centroids[k] = 0; // fallback if cluster is empty
+    }
+
+    float db = daviesBouldinIndex(N_frames, K, clusters, centroids, rmsdHost);
 
     delete[] clusters;
+    delete[] centroids;
     return db;
 }
 
@@ -364,7 +385,7 @@ int main() {
                 memcpy(best_clusters, km_clusters, N_frames * sizeof(int));
             }
 
-            float db_rand = runRandomFromInit(N_frames, K, rmsdHost, init_centroids);
+            float db_rand = runRandomClusterAssignment(N_frames, K, rmsdHost);
 
             if (db_rand < best_rd_db_km) {
                 best_rd_db_km = db_rand;

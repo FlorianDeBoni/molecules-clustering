@@ -1,7 +1,10 @@
 /*
     Compile with:
-    g++ -std=c++17 -O3 md_reader.cpp -lchemfiles -o md_reader
-
+    g++ -std=c++17 -O3 md_reader.cpp \
+        -I/usr/users/gpumol/deboni_flo/Bureau/include \
+        -L/usr/users/gpumol/deboni_flo/Bureau/lib -lchemfiles \
+        -o md_reader
+    
     Run:
     ./md_reader
 */

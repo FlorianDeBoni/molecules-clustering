@@ -1,6 +1,6 @@
 /*
     Compile with:
-    nvcc -ccbin /usr/bin/g++-12 -std=c++11 -O3 \
+    nvcc -ccbin /usr/bin/g++-12 -std=c++11 -O3 --use_fast_math \
     main.cu FileUtils.cpp gpu.cu \
     -I/usr/local/cuda/include \
     -L/usr/local/cuda/lib64 -lcudart \
@@ -17,6 +17,7 @@
 #include "gpu.cuh"
 #include <cuda_runtime.h>
 #include <stdio.h>
+#include <iomanip>
 
 // CUDA error checking macro
 #define CUDA_CHECK(call) \
@@ -212,11 +213,11 @@ float runRandomClustering(int N_frames, int K, const float* rmsdHost) {
 
 int main() {
    
-    cudaEvent_t start, stop;
-    CUDA_CHECK(cudaEventCreate(&start));
-    CUDA_CHECK(cudaEventCreate(&stop));
-
-    CUDA_CHECK(cudaEventRecord(start, 0));
+    cudaEvent_t evStart, evStop, evTotalStart, evTotalStop;
+    CUDA_CHECK(cudaEventCreate(&evStart));
+    CUDA_CHECK(cudaEventCreate(&evStop));
+    CUDA_CHECK(cudaEventCreate(&evTotalStart));
+    CUDA_CHECK(cudaEventCreate(&evTotalStop));
 
     int MAX_ITER = 50;
     int K_MIN = 2;
@@ -243,7 +244,15 @@ int main() {
     // Copy reordered CPU → GPU
     float* frameGPU;
     CUDA_CHECK(cudaMalloc(&frameGPU, total_size));
+    CUDA_CHECK(cudaEventRecord(evTotalStart));
+
+    float t_h2d = 0.f;
+    CUDA_CHECK(cudaEventRecord(evStart));
     CUDA_CHECK(cudaMemcpy(frameGPU, frame, total_size, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaEventRecord(evStop));
+    CUDA_CHECK(cudaEventSynchronize(evStop));
+    CUDA_CHECK(cudaEventElapsedTime(&t_h2d, evStart, evStop));
+
 
     std::cout << "Copied " << (total_size / (1024.0*1024.0)) 
               << " MB to GPU" << std::endl;
@@ -261,15 +270,27 @@ int main() {
                 (N_frames + threads.y - 1) / threads.y);
 
     std::cout << "\nKernel Start" << std::endl;
+    float t_kernel = 0.f;
+    CUDA_CHECK(cudaEventRecord(evStart));
     RMSD<<<blocks, threads>>>(frameGPU, N_frames, N_atoms, rmsd);
-    
+    CUDA_CHECK(cudaEventRecord(evStop));
+
     CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaEventSynchronize(evStop));
+    CUDA_CHECK(cudaEventElapsedTime(&t_kernel, evStart, evStop));
+
     std::cout << "Kernel Finished" << std::endl;
 
     // Copy RMSD matrix back to host
     float* rmsdHost = new float[N_frames*N_frames];
+    float t_d2h = 0.f;
+
+    CUDA_CHECK(cudaEventRecord(evStart));
     CUDA_CHECK(cudaMemcpy(rmsdHost, rmsd, size_rmsd, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaEventRecord(evStop));
+    CUDA_CHECK(cudaEventSynchronize(evStop));
+    CUDA_CHECK(cudaEventElapsedTime(&t_d2h, evStart, evStop));
+
 
     // Verify symmetry
     std::cout << "\nVerifying RMSD matrix symmetry..." << std::endl;
@@ -300,29 +321,40 @@ int main() {
     std::vector<float> db_kmedoids;
     std::vector<float> db_random;
     
-    std::cout << "\nK\tDB_KMedoids\tDB_Random\tDifference\tConvergence" << std::endl;
-    std::cout << std::string(70, '-') << std::endl;
+    std::cout << "\n"
+            << std::setw(4)  << "K"
+            << std::setw(16) << "DB_KMedoids"
+            << std::setw(16) << "DB_Random"
+            << std::setw(16) << "Difference"
+            << std::setw(14) << "Result"
+            << '\n';
+    std::cout << std::string(4+16+16+16+14, '-') << '\n';
     
-    for (int K = K_MIN; K <= K_MAX; K++) {
-        std::cout << K << "\t" << std::flush;
-        
+    std::cout << std::fixed << std::setprecision(6);
+
+    for (int K = K_MIN; K <= K_MAX; ++K) {
         // Run K-medoids clustering
         float db_km = runKMedoids(N_frames, K, rmsdHost, MAX_ITER);
-        std::cout << db_km << "\t" << std::flush;
-        
+
         // Run random clustering baseline
         float db_rand = runRandomClustering(N_frames, K, rmsdHost);
-        std::cout << db_rand << "\t" << std::flush;
-        
+
         float diff = db_rand - db_km;
-        std::cout << diff << "\t" << std::flush;
-        std::cout << (diff > 0 ? "✓ Better" : "✗ Worse") << std::endl;
-        
+
+        std::cout
+            << std::setw(4)  << K
+            << std::setw(16) << db_km
+            << std::setw(16) << db_rand
+            << std::setw(16) << diff
+            << std::setw(14) << (diff > 0 ? "Better" : "Worse")
+            << '\n';
+
         // Store results
         K_values.push_back(K);
         db_kmedoids.push_back(db_km);
         db_random.push_back(db_rand);
     }
+
     
     std::cout << std::string(70, '=') << std::endl;
     
@@ -429,21 +461,27 @@ int main() {
     CUDA_CHECK(cudaFree(frameGPU));
     CUDA_CHECK(cudaFree(rmsd));
 
-    CUDA_CHECK(cudaEventRecord(stop, 0));
-    CUDA_CHECK(cudaEventSynchronize(stop));
+    CUDA_CHECK(cudaEventRecord(evTotalStop));
+    CUDA_CHECK(cudaEventSynchronize(evTotalStop));
 
-    float elapsed_ms = 0.0f;
-    CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, start, stop));
+    float total_ms = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&total_ms, evTotalStart, evTotalStop));
 
     std::cout << "\n" << std::string(70, '=') << std::endl;
     std::cout << "PERFORMANCE" << std::endl;
     std::cout << std::string(70, '=') << std::endl;
-    std::cout << "Total execution time: " << elapsed_ms/1000.0f << " s" << std::endl;
-    std::cout << "RMSD kernel time: ~15 s (from previous run)" << std::endl;
-    std::cout << "Clustering analysis: ~" << (elapsed_ms/1000.0f - 15) << " s" << std::endl;
 
-    CUDA_CHECK(cudaEventDestroy(start));
-    CUDA_CHECK(cudaEventDestroy(stop));
+    std::cout << "H2D copy time   : " << t_h2d   / 1000.0f << " s" << std::endl;
+    std::cout << "Kernel time     : " << t_kernel / 1000.0f << " s" << std::endl;
+    std::cout << "D2H copy time   : " << t_d2h   / 1000.0f << " s" << std::endl;
+    std::cout << "--------------------------------------" << std::endl;
+    std::cout << "Total execution: " << total_ms / 1000.0f << " s" << std::endl;
+
+    CUDA_CHECK(cudaEventDestroy(evStart));
+    CUDA_CHECK(cudaEventDestroy(evStop));
+    CUDA_CHECK(cudaEventDestroy(evTotalStart));
+    CUDA_CHECK(cudaEventDestroy(evTotalStop));
+
 
     return 0;
 }

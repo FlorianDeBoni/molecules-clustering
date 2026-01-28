@@ -16,6 +16,17 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
 
+void exportClusteringToJSON(
+    const char* filename,
+    const float* frame,
+    const int* clusters,
+    const int* centroids,
+    int N_frames,
+    int N_atoms,
+    int N_dims,
+    int K
+);
+
 
 void pickRandomCentroids(int N_frames, int K, int* centroids) {
     // Create a vector with all frame indices
@@ -241,6 +252,23 @@ int main() {
     );
 
     std::cout << "Random Davies–Bouldin index: " << db << std::endl;
+
+    // Export clustering results to JSON
+
+    std::cout << "Exporting data to output/clustering_results.json" << std::endl;
+
+    exportClusteringToJSON(
+        "output/clustering_results.json",
+        frame,
+        clusters,
+        centroids,
+        N_frames,
+        N_atoms,
+        N_dims,
+        K
+    );
+
+    std::cout << "Export finished !" << std::endl;
 
 
     // Cleanup

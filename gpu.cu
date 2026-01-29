@@ -125,7 +125,7 @@ void RMSD(
     int snap = blockIdx.x * blockDim.x + threadIdx.x;
     int ref_idx = blockIdx.y * blockDim.y + threadIdx.y;
 
-    // Only compute upper triangle
+    // Only compute upper triangle: ref_idx < snap
     if (snap >= N_frames || ref_idx >= N_frames || ref_idx >= snap)
         return;
 
@@ -283,9 +283,9 @@ void RMSD(
     }
 
     float rmsd = sqrtf(sum2 / N_atoms);
-    size_t idx = ref_idx * N_frames
-            - (ref_idx * (ref_idx + 1)) / 2
-            + (snap - ref_idx - 1);
+    size_t idx = (size_t)ref_idx * N_frames 
+               - ((size_t)ref_idx * ((size_t)ref_idx + 1)) / 2 
+               + (snap - ref_idx - 1);
 
     out[idx] = rmsd;
 }

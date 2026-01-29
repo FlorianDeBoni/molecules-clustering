@@ -51,7 +51,7 @@ int main() {
 
     std::cout << file << std::endl;
 
-    size_t N_frames = 20000;
+    size_t N_frames = 40000;
     // size_t N_frames = file.getN_frames();
     size_t N_atoms  = file.getN_atoms();
     size_t N_dims   = file.getN_dims();
@@ -82,7 +82,7 @@ int main() {
               << " MB to GPU" << std::endl;
 
     // Allocate RMSD matrix
-    size_t rmsd_elems = (N_frames * (N_frames - 1)) / 2;
+    size_t rmsd_elems = ((size_t)N_frames * ((size_t)N_frames - 1)) / 2;
     size_t size_rmsd  = rmsd_elems * sizeof(float);
     float* rmsd = nullptr;
     CUDA_CHECK(cudaMalloc(&rmsd, size_rmsd));

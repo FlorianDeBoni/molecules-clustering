@@ -10,10 +10,12 @@
 
 float getRMSD(int i, int j, const float* rmsdHost, int N_frames) {
     if (i == j) return 0.0f;
-    if (i > j) std::swap(i,j);
-    size_t idx = i*N_frames - (i*(i+1))/2 + (j - i - 1);
+    if (i > j) std::swap(i, j);
+    size_t idx = (size_t)i * N_frames 
+               - ((size_t)i * ((size_t)i + 1)) / 2 
+               + (j - i - 1);
     return rmsdHost[idx];
-};
+}
 
 void pickKMedoidsPlusPlus(int N_frames, int K, const float* rmsd, int* centroids) {
     std::random_device rd;

@@ -1,6 +1,7 @@
 /*
     Compile with:
-    nvcc -ccbin /usr/bin/g++-12 -std=c++11 -O3 --use_fast_math \
+    
+    nvcc -ccbin /usr/bin/g++-12 -std=c++11 -O3 --use_fast_math -Xcompiler -fopenmp \
     main.cu FileUtils.cpp gpu.cu utils.cu \
     -I/usr/local/cuda/include \
     -L/usr/local/cuda/lib64 -lcudart \
@@ -19,6 +20,8 @@
 #include <stdio.h>
 #include <iomanip>
 #include "utils.cuh"
+#include <omp.h>
+
 
 // CUDA error checking macro
 #define CUDA_CHECK(call) \
@@ -132,17 +135,17 @@ int main() {
     // ==============================================================
     // MAIN ANALYSIS: Scan K from K_MIN to K_MAX
     // ==============================================================
-    
+
     std::cout << "\n" << std::string(70, '=') << std::endl;
     std::cout << "DAVIES-BOULDIN INDEX ANALYSIS (K = " << K_MIN 
-              << " to " << K_MAX << ")" << std::endl;
+            << " to " << K_MAX << ")" << std::endl;
     std::cout << std::string(70, '=') << std::endl;
-    
-    // Storage for results
+
+    // Storage for results - DECLARE ONLY ONCE
     std::vector<int> K_values;
     std::vector<float> db_kmedoids;
     std::vector<float> db_random;
-    
+
     std::cout << "\n"
             << std::setw(4)  << "K"
             << std::setw(16) << "DB_KMedoids"
@@ -151,11 +154,21 @@ int main() {
             << std::setw(14) << "Result"
             << '\n';
     std::cout << std::string(4+16+16+16+14, '-') << '\n';
-    
+
     std::cout << std::fixed << std::setprecision(6);
 
+    // Pre-allocate for thread safety
+    int num_K = K_MAX - K_MIN + 1;
+    K_values.resize(num_K);
+    db_kmedoids.resize(num_K);
+    db_random.resize(num_K);
 
-    for (int K = K_MIN; K <= K_MAX; ++K) {
+    double clustering_start = omp_get_wtime();
+
+    #pragma omp parallel for schedule(dynamic)
+    for (int k_idx = 0; k_idx < num_K; ++k_idx) {
+        int K = K_MIN + k_idx;
+        
         float best_db_km = 1e30f;
         float best_rd_db_km = 1e30f;
 
@@ -194,29 +207,34 @@ int main() {
             delete[] km_clusters;
         }
 
-
         float diff = best_rd_db_km - best_db_km;
 
-        // Print nicely formatted output
-        std::cout
-            << std::setw(4)  << K
-            << std::setw(16) << best_db_km
-            << std::setw(16) << best_rd_db_km
-            << std::setw(16) << diff
-            << std::setw(14) << (diff > 0 ? "Better" : "Worse")
-            << '\n';
+        // Store results in pre-allocated vectors (thread-safe)
+        K_values[k_idx] = K;
+        db_kmedoids[k_idx] = best_db_km;
+        db_random[k_idx] = best_rd_db_km;
 
-
-        // Store results
-        K_values.push_back(K);
-        db_kmedoids.push_back(best_db_km);
-        db_random.push_back(best_rd_db_km);
+        // Print with critical section to avoid interleaved output
+        #pragma omp critical
+        {
+            std::cout
+                << std::setw(4)  << K
+                << std::setw(16) << best_db_km
+                << std::setw(16) << best_rd_db_km
+                << std::setw(16) << diff
+                << std::setw(14) << (diff > 0 ? "Better" : "Worse")
+                << '\n';
+        }
 
         delete[] best_centroids;
         delete[] best_clusters;
     }
 
+    double clustering_end = omp_get_wtime();
+    double clustering_time = clustering_end - clustering_start;
 
+    std::cout << std::string(70, '=') << std::endl;
+    std::cout << "Clustering analysis time: " << clustering_time << " s" << std::endl;
     
     std::cout << std::string(70, '=') << std::endl;
     
@@ -342,6 +360,7 @@ int main() {
     std::cout << "H2D copy time   : " << t_h2d   / 1000.0f << " s" << std::endl;
     std::cout << "Kernel time     : " << t_kernel / 1000.0f << " s" << std::endl;
     std::cout << "D2H copy time   : " << t_d2h   / 1000.0f << " s" << std::endl;
+    std::cout << "Clustering time : " << clustering_time << " s" << std::endl;
     std::cout << "--------------------------------------" << std::endl;
     std::cout << "Total execution: " << total_ms / 1000.0f << " s" << std::endl;
 

@@ -10,10 +10,10 @@
 #include <chrono>
 #include <iomanip>
 
-void pickKMedoidsPlusPlus(int N_frames, int K, const float* rmsd, int* centroids);
+void pickKMedoidsPlusPlus(int N_snapshots, int K, const float* rmsd, int* centroids);
 
 void createClusters(
-    int N_frames,
+    int N_snapshots,
     int K,
     const float* rmsd,
     const int* centroids,
@@ -21,7 +21,7 @@ void createClusters(
 );
 
 void updateCentroids(
-    int N_frames,
+    int N_snapshots,
     int K,
     const int* clusters,
     const float* rmsdHost,
@@ -29,7 +29,7 @@ void updateCentroids(
 );
 
 float daviesBouldinIndex(
-    int N_frames,
+    int N_snapshots,
     int K,
     const int* clusters,
     const int* centroids,
@@ -37,14 +37,14 @@ float daviesBouldinIndex(
 );
 
 // Run K-medoids clustering and return DB index
-float runKMedoidsInit(int N_frames, int K, const float* rmsdHost,
+float runKMedoidsInit(int N_snapshots, int K, const float* rmsdHost,
                       int MAX_ITER,
                       const int* init_centroids,
                       int* final_centroids,
                       int* final_clusters);
 
 // Run random clustering and return DB index
-float runRandomClusterAssignment(int N_frames, int K, const float* rmsdHost);
+float runRandomClusterAssignment(int N_snapshots, int K, const float* rmsdHost);
 
 __host__ __device__
 inline int upper_triangle_index(int i, int j, int N) {

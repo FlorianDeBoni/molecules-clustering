@@ -24,7 +24,7 @@ inline void freeOnGPU(float* ptr) {
 __global__
 void RMSD(
     const float* __restrict__ dst,   // reordered coordinates: X,Y,Z blocks
-    int N_frames,
+    int N_snapshots,
     int N_atoms,
     float*out
 );

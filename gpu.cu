@@ -116,7 +116,7 @@ void compute_eigenvalues_symmetric_3x3(float m00, float m01, float m02,
 __global__
 void RMSD(
     const float* __restrict__ dst,
-    int N_frames,
+    int N_snapshots,
     int N_atoms,
     float* out
 )
@@ -126,7 +126,7 @@ void RMSD(
     int ref_idx = blockIdx.y * blockDim.y + threadIdx.y;
 
     // Only compute upper triangle: ref_idx < snap
-    if (snap >= N_frames || ref_idx >= N_frames || ref_idx >= snap)
+    if (snap >= N_snapshots || ref_idx >= N_snapshots || ref_idx >= snap)
         return;
 
     // ----------------- STEP 0: Centroids -----------------
@@ -134,13 +134,13 @@ void RMSD(
     float sx=0.f, sy=0.f, sz=0.f;
 
     for (int a = 0; a < N_atoms; ++a) {
-        size_t idx_ref_x = 0 * N_atoms * N_frames + a * N_frames + ref_idx;
-        size_t idx_ref_y = 1 * N_atoms * N_frames + a * N_frames + ref_idx;
-        size_t idx_ref_z = 2 * N_atoms * N_frames + a * N_frames + ref_idx;
+        size_t idx_ref_x = 0 * N_atoms * N_snapshots + a * N_snapshots + ref_idx;
+        size_t idx_ref_y = 1 * N_atoms * N_snapshots + a * N_snapshots + ref_idx;
+        size_t idx_ref_z = 2 * N_atoms * N_snapshots + a * N_snapshots + ref_idx;
 
-        size_t idx_snap_x = 0 * N_atoms * N_frames + a * N_frames + snap;
-        size_t idx_snap_y = 1 * N_atoms * N_frames + a * N_frames + snap;
-        size_t idx_snap_z = 2 * N_atoms * N_frames + a * N_frames + snap;
+        size_t idx_snap_x = 0 * N_atoms * N_snapshots + a * N_snapshots + snap;
+        size_t idx_snap_y = 1 * N_atoms * N_snapshots + a * N_snapshots + snap;
+        size_t idx_snap_z = 2 * N_atoms * N_snapshots + a * N_snapshots + snap;
 
         cx += dst[idx_ref_x];
         cy += dst[idx_ref_y];
@@ -161,13 +161,13 @@ void RMSD(
 
     for (int a = 0; a < N_atoms; ++a)
     {
-        size_t idx_ref_x = 0 * N_atoms * N_frames + a * N_frames + ref_idx;
-        size_t idx_ref_y = 1 * N_atoms * N_frames + a * N_frames + ref_idx;
-        size_t idx_ref_z = 2 * N_atoms * N_frames + a * N_frames + ref_idx;
+        size_t idx_ref_x = 0 * N_atoms * N_snapshots + a * N_snapshots + ref_idx;
+        size_t idx_ref_y = 1 * N_atoms * N_snapshots + a * N_snapshots + ref_idx;
+        size_t idx_ref_z = 2 * N_atoms * N_snapshots + a * N_snapshots + ref_idx;
 
-        size_t idx_snap_x = 0 * N_atoms * N_frames + a * N_frames + snap;
-        size_t idx_snap_y = 1 * N_atoms * N_frames + a * N_frames + snap;
-        size_t idx_snap_z = 2 * N_atoms * N_frames + a * N_frames + snap;
+        size_t idx_snap_x = 0 * N_atoms * N_snapshots + a * N_snapshots + snap;
+        size_t idx_snap_y = 1 * N_atoms * N_snapshots + a * N_snapshots + snap;
+        size_t idx_snap_z = 2 * N_atoms * N_snapshots + a * N_snapshots + snap;
 
         float rx = dst[idx_ref_x] - cx;
         float ry = dst[idx_ref_y] - cy;
@@ -255,13 +255,13 @@ void RMSD(
     // ----------------- STEP 8: Compute RMSD -----------------
     float sum2 = 0.f;
     for (int a = 0; a < N_atoms; ++a) {
-        size_t idx_ref_x = 0 * N_atoms * N_frames + a * N_frames + ref_idx;
-        size_t idx_ref_y = 1 * N_atoms * N_frames + a * N_frames + ref_idx;
-        size_t idx_ref_z = 2 * N_atoms * N_frames + a * N_frames + ref_idx;
+        size_t idx_ref_x = 0 * N_atoms * N_snapshots + a * N_snapshots + ref_idx;
+        size_t idx_ref_y = 1 * N_atoms * N_snapshots + a * N_snapshots + ref_idx;
+        size_t idx_ref_z = 2 * N_atoms * N_snapshots + a * N_snapshots + ref_idx;
 
-        size_t idx_snap_x = 0 * N_atoms * N_frames + a * N_frames + snap;
-        size_t idx_snap_y = 1 * N_atoms * N_frames + a * N_frames + snap;
-        size_t idx_snap_z = 2 * N_atoms * N_frames + a * N_frames + snap;
+        size_t idx_snap_x = 0 * N_atoms * N_snapshots + a * N_snapshots + snap;
+        size_t idx_snap_y = 1 * N_atoms * N_snapshots + a * N_snapshots + snap;
+        size_t idx_snap_z = 2 * N_atoms * N_snapshots + a * N_snapshots + snap;
 
         float rx = dst[idx_ref_x] - cx;
         float ry = dst[idx_ref_y] - cy;
@@ -283,7 +283,7 @@ void RMSD(
     }
 
     float rmsd = sqrtf(sum2 / N_atoms);
-    size_t idx = (size_t)ref_idx * N_frames 
+    size_t idx = (size_t)ref_idx * N_snapshots 
                - ((size_t)ref_idx * ((size_t)ref_idx + 1)) / 2 
                + (snap - ref_idx - 1);
 

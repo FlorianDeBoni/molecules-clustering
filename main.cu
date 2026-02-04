@@ -52,19 +52,19 @@ int main() {
 
     std::cout << file << std::endl;
 
-    size_t N_frames = 40000;
-    // size_t N_frames = file.getN_frames();
+    size_t N_snapshots = 10000;
+    // size_t N_snapshots = file.getN_snapshots();
     size_t N_atoms  = file.getN_atoms();
     size_t N_dims   = file.getN_dims();
 
-    std::cout << "Processing " << N_frames << " frames with " 
+    std::cout << "Processing " << N_snapshots << " snapshots with " 
               << N_atoms << " atoms each" << std::endl;
 
     // Load and reorder into X,Y,Z blocks
-    float* reordered_file_host = file.loadData(N_frames);
-    file.reorderByLine(reordered_file_host, N_frames);
+    float* reordered_file_host = file.loadData(N_snapshots);
+    file.reorderByLine(reordered_file_host, N_snapshots);
 
-    size_t total_size = N_frames * N_atoms * N_dims * sizeof(float);    
+    size_t total_size = N_snapshots * N_atoms * N_dims * sizeof(float);    
 
     // Copy reordered CPU → GPU
     float* reordered_file;
@@ -83,7 +83,7 @@ int main() {
               << " MB to GPU" << std::endl;
 
     // Allocate RMSD matrix
-    size_t rmsd_elems = ((size_t)N_frames * ((size_t)N_frames - 1)) / 2;
+    size_t rmsd_elems = ((size_t)N_snapshots * ((size_t)N_snapshots - 1)) / 2;
     size_t size_rmsd  = rmsd_elems * sizeof(float);
     float* rmsd = nullptr;
     CUDA_CHECK(cudaMalloc(&rmsd, size_rmsd));
@@ -93,13 +93,13 @@ int main() {
               << " MB for RMSD matrix" << std::endl;
 
     dim3 threads(16, 16);
-    dim3 blocks((N_frames + threads.x - 1) / threads.x, 
-                (N_frames + threads.y - 1) / threads.y);
+    dim3 blocks((N_snapshots + threads.x - 1) / threads.x, 
+                (N_snapshots + threads.y - 1) / threads.y);
 
     std::cout << "\nKernel Start" << std::endl;
     float t_kernel = 0.f;
     CUDA_CHECK(cudaEventRecord(evStart));
-    RMSD<<<blocks, threads>>>(reordered_file, N_frames, N_atoms, rmsd);
+    RMSD<<<blocks, threads>>>(reordered_file, N_snapshots, N_atoms, rmsd);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
     CUDA_CHECK(cudaFree(reordered_file));
@@ -163,18 +163,18 @@ int main() {
         float best_rd_db_km = 1e30f;
 
         int* best_centroids = new int[K];
-        int* best_clusters  = new int[N_frames];
+        int* best_clusters  = new int[N_snapshots];
 
         for (int trial = 0; trial < NB_TRIAL; trial++) {
 
             int* init_centroids = new int[K];
             int* km_centroids   = new int[K];
-            int* km_clusters    = new int[N_frames];
+            int* km_clusters    = new int[N_snapshots];
 
-            pickKMedoidsPlusPlus(N_frames, K, rmsd_host, init_centroids);
+            pickKMedoidsPlusPlus(N_snapshots, K, rmsd_host, init_centroids);
 
             float db_km_trial = runKMedoidsInit(
-                N_frames, K, rmsd_host, MAX_ITER,
+                N_snapshots, K, rmsd_host, MAX_ITER,
                 init_centroids,
                 km_centroids,
                 km_clusters
@@ -183,10 +183,10 @@ int main() {
             if (db_km_trial < best_db_km) {
                 best_db_km = db_km_trial;
                 memcpy(best_centroids, km_centroids, K * sizeof(int));
-                memcpy(best_clusters, km_clusters, N_frames * sizeof(int));
+                memcpy(best_clusters, km_clusters, N_snapshots * sizeof(int));
             }
 
-            float db_rand = runRandomClusterAssignment(N_frames, K, rmsd_host);
+            float db_rand = runRandomClusterAssignment(N_snapshots, K, rmsd_host);
 
             if (db_rand < best_rd_db_km) {
                 best_rd_db_km = db_rand;
@@ -286,40 +286,40 @@ int main() {
     std::cout << std::string(70, '=') << std::endl;
     
     int* final_centroids = new int[optimal_K_db];
-    int* final_clusters = new int[N_frames];
+    int* final_clusters = new int[N_snapshots];
     
-    pickKMedoidsPlusPlus(N_frames, optimal_K_db, rmsd_host, final_centroids);
+    pickKMedoidsPlusPlus(N_snapshots, optimal_K_db, rmsd_host, final_centroids);
 
     float final_db = runKMedoidsInit(
-        N_frames, optimal_K_db, rmsd_host, MAX_ITER,
+        N_snapshots, optimal_K_db, rmsd_host, MAX_ITER,
         final_centroids,
         final_centroids,
         final_clusters
     );
 
-    std::cout << "\nFinal centroids (frame indices):" << std::endl;
+    std::cout << "\nFinal centroids (snapshot indices):" << std::endl;
     for (int k = 0; k < optimal_K_db; k++) {
-        std::cout << "  Cluster " << k << ": frame " << final_centroids[k] << std::endl;
+        std::cout << "  Cluster " << k << ": snapshot " << final_centroids[k] << std::endl;
     }
     
     // Compute cluster sizes
     std::vector<int> cluster_sizes(optimal_K_db, 0);
-    for (int i = 0; i < N_frames; i++) {
+    for (int i = 0; i < N_snapshots; i++) {
         cluster_sizes[final_clusters[i]]++;
     }
     
     std::cout << "\nCluster sizes:" << std::endl;
     for (int k = 0; k < optimal_K_db; k++) {
-        float percent = 100.0f * cluster_sizes[k] / N_frames;
+        float percent = 100.0f * cluster_sizes[k] / N_snapshots;
         std::cout << "  Cluster " << k << ": " << cluster_sizes[k] 
-                  << " frames (" << percent << "%)" << std::endl;
+                  << " snapshots (" << percent << "%)" << std::endl;
     }
     
     // Save centroids to file
     std::ofstream cent_out("output/optimal_centroids.txt");
     cent_out << "# Optimal K = " << optimal_K_db << "\n";
     cent_out << "# Davies-Bouldin Index = " << final_db << "\n";
-    cent_out << "# Cluster\tFrame_Index\tSize\n";
+    cent_out << "# Cluster\tSnapshot_Index\tSize\n";
     for (int k = 0; k < optimal_K_db; k++) {
         cent_out << k << "\t" << final_centroids[k] << "\t" 
                  << cluster_sizes[k] << "\n";

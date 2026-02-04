@@ -19,7 +19,7 @@
 namespace fs = std::filesystem;
 
 struct TrajectoryInfo {
-    size_t n_frames;
+    size_t n_snapshots;
     size_t n_atoms;
     std::streampos data_start_pos;  // Track where data was written
 };
@@ -35,18 +35,18 @@ TrajectoryInfo write_trajectory_to_file(const std::string& trajectory_file,
         traj.set_topology(topology);
         
         while (!traj.done()) {
-            auto frame = traj.read();
-            auto positions = frame.positions();
+            auto snapshot = traj.read();
+            auto positions = snapshot.positions();
             
-            if (info.n_frames == 0) {
+            if (info.n_snapshots == 0) {
                 info.n_atoms = positions.size();
                 std::cout << "  Atoms in trajectory: " << info.n_atoms << std::endl;
             }
             
             // Verify atom count consistency within trajectory
             if (positions.size() != info.n_atoms) {
-                throw std::runtime_error("Inconsistent atom count within trajectory at frame " + 
-                                       std::to_string(info.n_frames));
+                throw std::runtime_error("Inconsistent atom count within trajectory at snapshot " + 
+                                       std::to_string(info.n_snapshots));
             }
             
             for (size_t j = 0; j < positions.size(); j++) {
@@ -58,15 +58,15 @@ TrajectoryInfo write_trajectory_to_file(const std::string& trajectory_file,
                 outfile.write(reinterpret_cast<const char*>(coords), 3 * sizeof(float));
             }
             
-            info.n_frames++;
+            info.n_snapshots++;
             
-            if (info.n_frames % 1000 == 0) {
-                std::cout << "  Progress: " << info.n_frames << " frames" << std::endl;
+            if (info.n_snapshots % 1000 == 0) {
+                std::cout << "  Progress: " << info.n_snapshots << " snapshots" << std::endl;
                 std::cout.flush();
             }
         }
         
-        std::cout << "  Completed: " << info.n_frames << " frames" << std::endl;
+        std::cout << "  Completed: " << info.n_snapshots << " snapshots" << std::endl;
         
     } catch (const chemfiles::Error& e) {
         throw std::runtime_error("Chemfiles error reading " + trajectory_file + ": " + std::string(e.what()));
@@ -89,12 +89,12 @@ int main() {
         }
 
         // Reserve space for header (3 size_t values)
-        size_t total_frames = 0;
+        size_t total_snapshots = 0;
         size_t n_atoms = 0;
         size_t n_dims = 3;
 
         std::streampos header_pos = outfile.tellp();
-        outfile.write(reinterpret_cast<const char*>(&total_frames), sizeof(size_t));
+        outfile.write(reinterpret_cast<const char*>(&total_snapshots), sizeof(size_t));
         outfile.write(reinterpret_cast<const char*>(&n_atoms), sizeof(size_t));
         outfile.write(reinterpret_cast<const char*>(&n_dims), sizeof(size_t));
 
@@ -127,8 +127,8 @@ int main() {
 
             // Read topology
             chemfiles::Trajectory topology_traj(pdb_file.string(), 'r', "PDB");
-            auto topology_frame = topology_traj.read();
-            auto topology = topology_frame.topology();
+            auto topology_snapshot = topology_traj.read();
+            auto topology = topology_snapshot.topology();
 
             std::cout << "  Topology atoms: " << topology.size() << std::endl;
 
@@ -157,7 +157,7 @@ int main() {
                     continue;
                 }
 
-                total_frames += info.n_frames;
+                total_snapshots += info.n_snapshots;
 
             } catch (const std::exception& e) {
                 std::cerr << "ERROR processing " << subdir.filename() << ": " 
@@ -169,28 +169,28 @@ int main() {
         }
 
         // Verify we have data
-        if (total_frames == 0 || n_atoms == 0) {
+        if (total_snapshots == 0 || n_atoms == 0) {
             throw std::runtime_error("No valid trajectory data was processed");
         }
 
         // Write final header
         outfile.seekp(header_pos);
-        outfile.write(reinterpret_cast<const char*>(&total_frames), sizeof(size_t));
+        outfile.write(reinterpret_cast<const char*>(&total_snapshots), sizeof(size_t));
         outfile.write(reinterpret_cast<const char*>(&n_atoms), sizeof(size_t));
         outfile.write(reinterpret_cast<const char*>(&n_dims), sizeof(size_t));
 
         outfile.close();
 
         std::cout << "\n=== Summary ===" << std::endl;
-        std::cout << "Total frames: " << total_frames << std::endl;
-        std::cout << "Atoms per frame: " << n_atoms << std::endl;
-        std::cout << "Shape: (" << total_frames << ", " << n_atoms << ", 3)" << std::endl;
+        std::cout << "Total snapshots: " << total_snapshots << std::endl;
+        std::cout << "Atoms per snapshot: " << n_atoms << std::endl;
+        std::cout << "Shape: (" << total_snapshots << ", " << n_atoms << ", 3)" << std::endl;
         std::cout << "Output file: " << output_file << std::endl;
 
         // Verify file size
         std::ifstream check(output_file, std::ios::binary | std::ios::ate);
         size_t file_size = check.tellg();
-        size_t expected_size = 3 * sizeof(size_t) + total_frames * n_atoms * 3 * sizeof(float);
+        size_t expected_size = 3 * sizeof(size_t) + total_snapshots * n_atoms * 3 * sizeof(float);
         
         std::cout << "File size: " << (file_size / (1024.0 * 1024.0)) << " MB" << std::endl;
         std::cout << "Expected size: " << (expected_size / (1024.0 * 1024.0)) << " MB" << std::endl;

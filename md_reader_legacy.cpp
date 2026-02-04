@@ -13,7 +13,7 @@
 #include <vector>
 
 struct TrajectoryInfo {
-    size_t n_frames;
+    size_t n_snapshots;
     size_t n_atoms;
 };
 
@@ -28,12 +28,12 @@ TrajectoryInfo write_trajectory_to_file(const std::string& trajectory_file,
         chemfiles::Trajectory traj(trajectory_file, 'r');
         traj.set_topology(topology);
         
-        // Read and write frames one at a time
+        // Read and write snapshots one at a time
         while (!traj.done()) {
-            auto frame = traj.read();
-            auto positions = frame.positions();
+            auto snapshot = traj.read();
+            auto positions = snapshot.positions();
             
-            if (info.n_frames == 0) {
+            if (info.n_snapshots == 0) {
                 info.n_atoms = positions.size();
             }
             
@@ -48,16 +48,16 @@ TrajectoryInfo write_trajectory_to_file(const std::string& trajectory_file,
                 outfile.write(reinterpret_cast<const char*>(coords), 3 * sizeof(float));
             }
             
-            info.n_frames++;
+            info.n_snapshots++;
             
-            // Progress indicator every 1000 frames
-            if (info.n_frames % 1000 == 0) {
-                std::cout << "  Progress: " << info.n_frames << " frames" << std::endl;
+            // Progress indicator every 1000 snapshots
+            if (info.n_snapshots % 1000 == 0) {
+                std::cout << "  Progress: " << info.n_snapshots << " snapshots" << std::endl;
                 std::cout.flush();
             }
         }
         
-        std::cout << "  Completed: " << info.n_frames << " frames" << std::endl;
+        std::cout << "  Completed: " << info.n_snapshots << " snapshots" << std::endl;
     } catch (const chemfiles::Error& e) {
         throw std::runtime_error("Chemfiles error: " + std::string(e.what()));
     }
@@ -73,8 +73,8 @@ int main() {
         // Load topology once
         std::cout << "Loading topology..." << std::endl;
         chemfiles::Trajectory topology_traj(topology_file, 'r', "PDB");
-        auto topology_frame = topology_traj.read();
-        auto topology = topology_frame.topology();
+        auto topology_snapshot = topology_traj.read();
+        auto topology = topology_snapshot.topology();
         std::cout << "Topology loaded: " << topology.size() << " atoms" << std::endl;
         
         // Create output file
@@ -84,32 +84,32 @@ int main() {
         }
         
         // Reserve space for header (will write later)
-        size_t total_frames = 0;
+        size_t total_snapshots = 0;
         size_t n_atoms = 0;
         size_t header_pos = outfile.tellp();
-        outfile.write(reinterpret_cast<const char*>(&total_frames), sizeof(size_t));
+        outfile.write(reinterpret_cast<const char*>(&total_snapshots), sizeof(size_t));
         outfile.write(reinterpret_cast<const char*>(&n_atoms), sizeof(size_t));
-        outfile.write(reinterpret_cast<const char*>(&total_frames), sizeof(size_t)); // placeholder
+        outfile.write(reinterpret_cast<const char*>(&total_snapshots), sizeof(size_t)); // placeholder
         
         // Process R1
         std::cout << "\nReading R1 trajectory..." << std::endl;
         auto info_R1 = write_trajectory_to_file("./dataset_legacy/1k5n/1k5n_A_prod_R1_fit.xtc", topology, outfile);
-        total_frames += info_R1.n_frames;
+        total_snapshots += info_R1.n_snapshots;
         n_atoms = info_R1.n_atoms;
         
         // Process R2
         std::cout << "\nReading R2 trajectory..." << std::endl;
         auto info_R2 = write_trajectory_to_file("./dataset_legacy/1k5n/1k5n_A_prod_R2_fit.xtc", topology, outfile);
-        total_frames += info_R2.n_frames;
+        total_snapshots += info_R2.n_snapshots;
         
         // Process R3
         std::cout << "\nReading R3 trajectory..." << std::endl;
         auto info_R3 = write_trajectory_to_file("./dataset_legacy/1k5n/1k5n_A_prod_R3_fit.xtc", topology, outfile);
-        total_frames += info_R3.n_frames;
+        total_snapshots += info_R3.n_snapshots;
         
         // Write header with final dimensions
         outfile.seekp(header_pos);
-        outfile.write(reinterpret_cast<const char*>(&total_frames), sizeof(size_t));
+        outfile.write(reinterpret_cast<const char*>(&total_snapshots), sizeof(size_t));
         outfile.write(reinterpret_cast<const char*>(&n_atoms), sizeof(size_t));
         size_t n_dims = 3;
         outfile.write(reinterpret_cast<const char*>(&n_dims), sizeof(size_t));
@@ -117,9 +117,9 @@ int main() {
         outfile.close();
         
         std::cout << "\n=== Summary ===" << std::endl;
-        std::cout << "Total frames: " << total_frames << std::endl;
-        std::cout << "Atoms per frame: " << n_atoms << std::endl;
-        std::cout << "Shape: (" << total_frames << ", " << n_atoms << ", 3)" << std::endl;
+        std::cout << "Total snapshots: " << total_snapshots << std::endl;
+        std::cout << "Atoms per snapshot: " << n_atoms << std::endl;
+        std::cout << "Shape: (" << total_snapshots << ", " << n_atoms << ", 3)" << std::endl;
         std::cout << "Data saved to: " << output_file << std::endl;
         
         // File size info

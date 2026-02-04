@@ -29,4 +29,26 @@ void RMSD(
     float*out
 );
 
+__global__ 
+void runKMedoidsGPU(
+    int N_frames,
+    int K,
+    const float* __restrict__ rmsd,
+    int MAX_ITER,
+    int* centroidsGPU, 
+    int* clustersGPU,
+    float* frameCosts
+);
+
+__global__ 
+void updateCentroidsGPU(
+    int N_frames,
+    int K,
+    int* centroidsGPU, 
+    int* clustersGPU,
+    float* frameCosts
+);
+
+
+
 #endif // GPU_CUH

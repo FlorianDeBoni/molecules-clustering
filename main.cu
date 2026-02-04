@@ -42,7 +42,7 @@ int main(int argc, char** args) {
 
     // std::cout << file << std::endl;
 
-    size_t N_frames = 10000;
+    size_t N_frames = 15000;
     // size_t N_frames = file.getN_frames();
     size_t N_atoms  = file.getN_atoms();
     size_t N_dims   = file.getN_dims();
@@ -69,7 +69,7 @@ int main(int argc, char** args) {
     cudaDeviceSynchronize();
     measure_seconds(mem_transfer_start, "CPU to GPU memory transfer");
 
-    dim3 threads(16,16);
+    dim3 threads(8,64);
     dim3 blocks((N_frames + threads.x - 1) / threads.x, 
                 (N_frames + threads.y - 1) / threads.y);
 
@@ -86,17 +86,61 @@ int main(int argc, char** args) {
     float* rmsdHost = new float[N_frames*N_frames];
     CHECK_SUCCESS(cudaMemcpy(rmsdHost, rmsd, size_rmsd, cudaMemcpyDeviceToHost), "Memcpy rmsd -> rmsdHost");
 
+    // ---------------- CLUSTERING GPU -----------------
     chrono_type clustering_loop_start = chrono_time::now();
+
+    int* clusters = new int[N_frames];
+    int* clustersGPU;
+    CHECK_SUCCESS(cudaMalloc(&clustersGPU, N_frames * sizeof(int)), "Allocating clustersGPU");
+
     // Pick first K unique indices
     int* centroids = new int[K];
-    int* clusters = new int[N_frames];
+    int* centroidsGPU;
+    CHECK_SUCCESS(cudaMalloc(&centroidsGPU, K * sizeof(int)), "Allocating centroidsGPU");
+    pickRandomCentroids(N_frames, K, centroids);
+    CHECK_SUCCESS(cudaMemcpy(centroidsGPU, centroids, K*sizeof(int), cudaMemcpyHostToDevice), "Memcpy centroids -> centroidsGPU");
 
-    float db_index = runKMedoids(N_frames, K, rmsdHost, MAX_ITER, centroids, clusters);
+    // costs for each centroid candidate
+    float* frameCostsGPU;
+    CHECK_SUCCESS(cudaMalloc(&frameCostsGPU, N_frames * sizeof(float)), "Allocating frameCostsGPU");
+
+    measure_seconds(clustering_loop_start, "==> Clustering memory setup");
+
+    dim3 clusteringThreads(1024);
+    dim3 clusteringBlocks(1 + ((N_frames - 1) / (threads.x)));
+    dim3 threadsPerClusterBlock(512);
+    size_t sharedMemSize = threadsPerClusterBlock.x * (sizeof(float) + sizeof(int));
+
+    for (int iter = 0; iter < MAX_ITER; iter++) {
+        runKMedoidsGPU<<<clusteringBlocks, clusteringThreads>>>(
+            N_frames,
+            K,
+            rmsd,
+            MAX_ITER,
+            centroidsGPU,
+            clustersGPU,
+            frameCostsGPU
+        );
+
+        updateCentroidsGPU<<<K, threadsPerClusterBlock, sharedMemSize>>>(
+            N_frames,
+            K,
+            centroidsGPU,
+            clustersGPU,
+            frameCostsGPU
+        );
+    }
+    measure_seconds(clustering_loop_start, "==> Clustering Total time");
+
+    CHECK_SUCCESS(cudaMemcpy(centroids, centroidsGPU, K * sizeof(int), cudaMemcpyDeviceToHost), "Memcpy centroidsGPU -> centroids");
+    CHECK_SUCCESS(cudaMemcpy(clusters, clustersGPU, N_frames * sizeof(int), cudaMemcpyDeviceToHost), "Memcpy clustersGPU -> clusters");
+
+    float db_index = daviesBouldinIndex(N_frames, K, clusters, centroids, rmsdHost);
+    // float db_index = runKMedoids(N_frames, K, rmsdHost, MAX_ITER, centroids, clusters);
     // float db_index = k_analysis(rmsdHost, N_frames, MAX_ITER);
 
     std::cout << "Davies–Bouldin index: " << db_index << std::endl;
 
-    measure_seconds(clustering_loop_start, "Clustering loop");
     measure_seconds(global_start, "Entire program");
 
     // Print db for random clustering

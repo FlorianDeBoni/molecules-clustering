@@ -437,3 +437,103 @@ void RMSD(
     out[ref_idx * N_frames + snap] = rmsd;
     out[snap * N_frames + ref_idx] = rmsd;
 }
+
+__global__ 
+void runKMedoidsGPU(
+    int N_frames,
+    int K,
+    const float* __restrict__ rmsd,
+    int MAX_ITER,
+    int* centroidsGPU, 
+    int* clustersGPU,
+    float* frameCosts
+)
+{
+    // Assigning each frame to a cluster
+    int frame_id = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (frame_id >= N_frames) {
+        return;
+    }
+
+    int best_cluster = 0;
+    float best_d = HUGE_VALF;
+    for (int k = 0; k<K; k++) {
+        float curr_distance = rmsd[N_frames * centroidsGPU[k] + frame_id];
+        if (curr_distance < best_d) {
+            best_cluster = k;
+            best_d = curr_distance;
+        }
+    }
+    clustersGPU[frame_id] = best_cluster;
+
+    // Assignment completed for all frames
+    __syncthreads();
+
+    // Updating centroids
+    float cost = 0;
+    int member_count = 0;
+    for (int j = 0; j<N_frames; j++) {
+        if (best_cluster == clustersGPU[j]) {
+            // j in the same cluster as frame_id
+            // not always a coalescent access (j is different for other threads)
+            cost += rmsd[N_frames * j + frame_id];
+            member_count += 1;
+        }
+    }
+    frameCosts[frame_id] = cost;
+}
+
+__global__ 
+void updateCentroidsGPU(
+    int N_frames,
+    int K,
+    int* centroidsGPU, 
+    int* clustersGPU,
+    float* frameCosts
+)
+{
+    int k = blockIdx.x;
+    int tid = threadIdx.x;
+    
+    // Shared mem : [costs | indices]
+    extern __shared__ float smem[];
+    int* s_indices = (int*)&smem[blockDim.x];
+    
+    
+    // Calcul des minima locaux pour chaque thread
+    float local_min_cost = HUGE_VALF;
+    int local_min_idx = -1;
+    
+    for (int i = tid; i < N_frames; i += blockDim.x) {
+        if (clustersGPU[i] == k) {
+            // parcours divergent coalescence pas sûre
+            float cost = frameCosts[i];
+            if (cost < local_min_cost) {
+                local_min_cost = cost;
+                local_min_idx = i;
+            }
+        }
+    }
+    
+    // Store to shared memory
+    smem[tid] = local_min_cost;
+    s_indices[tid] = local_min_idx;
+    __syncthreads();
+    
+    // Reduction in shared memory
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            if (smem[tid + stride] < smem[tid]) {
+                smem[tid] = smem[tid + stride];
+                s_indices[tid] = s_indices[tid + stride];
+            }
+        }
+        __syncthreads();
+    }
+    
+    // Thread 0 updates the centroid
+    if (tid == 0) {
+        centroidsGPU[k] = s_indices[0];
+    }
+}

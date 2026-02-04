@@ -14,6 +14,31 @@
 using chrono_time = std::chrono::_V2::high_resolution_clock;
 using chrono_type = std::chrono::_V2::high_resolution_clock::time_point;
 
+int trinv(int n) {
+    return (int) ( ( 1 + std::sqrt( 1 + ( 8 * n ) ) ) / 2);
+}
+
+int triangle_read(int n) {
+    return n - (trinv(n)*(trinv(n)-1) / 2);
+}
+
+int sum_k(int k) {
+    return k * (k+1) / 2;
+}
+
+int col_index_parcours(int i, int bound) {
+    return (int) (bound - triangle_read( ((bound+1)*(bound+2)/2) - i - 1 ));
+}
+
+// max_cap -> Max Capacity in MB
+int get_chunk_frame_nb(size_t max_cap, size_t N_atoms, size_t N_dims, size_t N_frames) {
+
+    float delta = std::pow( N_atoms * N_dims, 2) + (4 * (1024*1024) * max_cap / sizeof(float));
+
+    float result = (0.5) * (((-1) * static_cast<double>(N_atoms) * static_cast<double>(N_dims)) + std::sqrt(delta));
+
+    return (int) result;
+}
 
 // Takes an std timestamp as start and a measurment title 
 // prints out [measurement] : now() - start to std::cout in seconds

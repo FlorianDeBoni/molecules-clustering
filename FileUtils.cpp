@@ -204,6 +204,49 @@ float* FileUtils::loadData(size_t n_subset_frames) {
     return data;
 }
 
+// Frame :
+// Frame0: [atom0_x, atom0_y, atom0_z, atom1_x, atom1_y, atom1_z, ...]
+// Frame1: [atom0_x, atom0_y, atom0_z, atom1_x, atom1_y, atom1_z, ...]
+// On utilise le fait que la matrice soit triangulaire supérieure, donc col >= row
+float* FileUtils::getFrameSubset(float* frames, int row_begin, int row_end, int col_begin, int col_end, size_t N_frames) {
+
+    float* frame_subset = nullptr;
+
+    // Cas où les frames de la colonne et de la ligne sont les memes.
+    if(row_begin == col_begin) {
+        int subset_size = row_end - row_begin;
+        int frame_arr_size = n_dims * n_atoms;
+        frame_subset = new (std::nothrow) float[subset_size*frame_arr_size];
+
+        for(int i=row_begin; i < row_end; ++i) {
+            for(int j=0; j < frame_arr_size; ++j) {
+                frame_subset[((i - row_begin)*frame_arr_size) + j] = frames[ (i * frame_arr_size) + j ];
+            }
+        }
+    }
+
+    // 2 ensembles disjoints de frames entre les lignes et les colonnes
+    else {
+        int subset_size = (row_end - row_begin) + (col_end - col_begin);
+        int frame_arr_size = n_dims * n_atoms;
+        frame_subset = new (std::nothrow) float[subset_size*frame_arr_size];
+
+        for(int i=row_begin; i < row_end; ++i) {
+            for(int j=0; j < frame_arr_size; ++j) {
+                frame_subset[((i - row_begin)*frame_arr_size) + j] = frames[ (i * frame_arr_size) + j ];
+            }
+        }
+
+        for(int i=col_begin; i < col_end; ++i) {
+            for(int j=0; j < frame_arr_size; ++j) {
+                frame_subset[((i + row_end - row_begin - col_begin)*frame_arr_size) + j] = frames[ (i * frame_arr_size) + j];
+            }
+        }
+
+    }
+
+    return frame_subset;
+}
 
 /*
 * Writes clustering result's centroid and cluster indices into a binary file.

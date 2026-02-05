@@ -17,23 +17,17 @@
 #include <algorithm>
 #include <filesystem>
 namespace fs = std::filesystem;
-#include <algorithm>
-#include <filesystem>
-namespace fs = std::filesystem;
 
 struct TrajectoryInfo {
     size_t n_snapshots;
     size_t n_atoms;
-    std::streampos data_start_pos;  // Track where data was written
     std::streampos data_start_pos;  // Track where data was written
 };
 
 // Read trajectory and write directly to file (streaming approach)
 TrajectoryInfo write_trajectory_to_file(const std::string& trajectory_file,
                                          const chemfiles::Topology& topology,
-                                         const chemfiles::Topology& topology,
                                          std::ofstream& outfile) {
-    TrajectoryInfo info = {0, 0, outfile.tellp()};
     TrajectoryInfo info = {0, 0, outfile.tellp()};
     
     try {
@@ -85,12 +79,6 @@ TrajectoryInfo write_trajectory_to_file(const std::string& trajectory_file,
 
 int main() {
     try {
-        std::string dataset_root = "./dataset";
-        std::string output_file = "output/snapshots_coords_all.bin";
-
-        // Ensure output folder exists
-        fs::create_directories(fs::path(output_file).parent_path());
-
         std::string dataset_root = "./dataset";
         std::string output_file = "output/snapshots_coords_all.bin";
 

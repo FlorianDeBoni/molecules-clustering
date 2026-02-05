@@ -44,12 +44,12 @@ int main(int argc, char** args) {
     size_t N_atoms = file.getN_atoms();
     size_t N_dims = file.getN_dims();
 
-    size_t MAX_DATA_CHUNK_SIZE = 650; // In MB
+    size_t MAX_DATA_CHUNK_SIZE = 5000; // In MB
 
-    int NB_FRAMES_CHUNK = get_chunk_frame_nb(MAX_DATA_CHUNK_SIZE, N_atoms, N_dims, N_frames);
-    int SQ_SUBMATRIX_SIZE = NB_FRAMES_CHUNK / 2;
-    int NB_ROW_ITERATIONS = (int) std::floor( ( N_frames - 1 ) / SQ_SUBMATRIX_SIZE ) + 1;
-    int RMSD_LOOPS_NEEDED = (int) NB_ROW_ITERATIONS * (NB_ROW_ITERATIONS + 1) / 2;
+    size_t NB_FRAMES_CHUNK = get_chunk_frame_nb(MAX_DATA_CHUNK_SIZE, N_atoms, N_dims, N_frames);
+    size_t SQ_SUBMATRIX_SIZE = NB_FRAMES_CHUNK / 2;
+    size_t NB_ROW_ITERATIONS = (size_t) std::floor( ( N_frames - 1 ) / SQ_SUBMATRIX_SIZE ) + 1;
+    size_t RMSD_LOOPS_NEEDED = (size_t) NB_ROW_ITERATIONS * (NB_ROW_ITERATIONS + 1) / 2;
     
     std::cout << "\n" << std::string(70, '=') << std::endl;
     std::cout << "RMSD COMPUTATION CONFIGURATION" << std::endl;
@@ -71,10 +71,10 @@ int main(int argc, char** args) {
 
     int row_begin = 0;
 
-    for(int iter=0; iter < RMSD_LOOPS_NEEDED; ++iter) {
+    for(size_t iter=0; iter < RMSD_LOOPS_NEEDED; ++iter) {
         int col_begin = col_index_parcours(iter, NB_ROW_ITERATIONS - 1) * SQ_SUBMATRIX_SIZE;
-        int col_end = std::min(col_begin + SQ_SUBMATRIX_SIZE, (int)N_frames);
-        int row_end = std::min(row_begin + SQ_SUBMATRIX_SIZE, (int)N_frames);
+        int col_end = std::min(col_begin + SQ_SUBMATRIX_SIZE, (size_t)N_frames);
+        int row_end = std::min(row_begin + SQ_SUBMATRIX_SIZE, (size_t)N_frames);
 
         int size_row = row_end - row_begin;
         int size_col = col_end - col_begin;

@@ -36,7 +36,7 @@ int trinv(int n);
 int triangle_read(int n);
 int sum_k(int k);
 int col_index_parcours(int i, int bound);
-int get_chunk_frame_nb(size_t max_cap, size_t N_atoms, size_t N_dims, size_t N_frames);
+size_t get_chunk_frame_nb(size_t max_cap, size_t N_atoms, size_t N_dims, size_t N_frames);
 
 // Timing
 void measure_seconds(const chrono_type& start, const std::string& measurement);

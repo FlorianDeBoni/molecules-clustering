@@ -20,10 +20,10 @@ int col_index_parcours(int i, int bound) {
     return (int) (bound - triangle_read( ((bound+1)*(bound+2)/2) - i - 1 ));
 }
 
-int get_chunk_frame_nb(size_t max_cap, size_t N_atoms, size_t N_dims, size_t N_frames) {
+size_t get_chunk_frame_nb(size_t max_cap, size_t N_atoms, size_t N_dims, size_t N_frames) {
     float delta = std::pow( N_atoms * N_dims, 2) + (4 * (1024*1024) * max_cap / sizeof(float));
     float result = (0.5) * (((-1) * static_cast<double>(N_atoms) * static_cast<double>(N_dims)) + std::sqrt(delta));
-    return (int) result;
+    return (size_t) result;
 }
 
 void measure_seconds(const chrono_type& start, const std::string& measurement) {

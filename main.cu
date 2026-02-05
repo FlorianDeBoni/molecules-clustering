@@ -52,7 +52,7 @@ int main() {
 
     std::cout << file << std::endl;
 
-    size_t N_snapshots = 10000;
+    size_t N_snapshots = 50000;
     // size_t N_snapshots = file.getN_snapshots();
     size_t N_atoms  = file.getN_atoms();
     size_t N_dims   = file.getN_dims();

@@ -40,6 +40,33 @@ size_t get_chunk_frame_nb(size_t max_cap_MB, size_t N_atoms, size_t N_dims) {
     return static_cast<size_t>(std::floor(F_tile));
 }
 
+size_t get_optimal_tile_size(size_t max_cap_MB, size_t N_atoms, size_t N_dims, size_t N_frames) {
+    // Convert GPU memory to number of floats
+    double M = static_cast<double>(max_cap_MB) * 1024.0 * 1024.0 / sizeof(float);
+
+    // Solve quadratic: F^2 + 2*(N_atoms*N_dims)*F - 2*M = 0
+    double a = 1.0;
+    double b = 2.0 * static_cast<double>(N_atoms) * static_cast<double>(N_dims);
+    double c = -2.0 * M;
+
+    double delta = b*b - 4.0*a*c;
+    if (delta < 0) {
+        std::cerr << "Memory too small for even one frame!" << std::endl;
+        return 0;
+    }
+
+    double F_tile = (-b + std::sqrt(delta)) / (2.0*a);
+
+    // Clip to total frames
+    F_tile = std::min(F_tile, static_cast<double>(N_frames));
+
+    // Optional: clip to CUDA safe tile (e.g., <= 65k for 16x16 threads)
+    const double MAX_SAFE_TILE = 65000.0;
+    F_tile = std::min(F_tile, MAX_SAFE_TILE);
+
+    return static_cast<size_t>(std::floor(F_tile));
+}
+
 void measure_seconds(const chrono_type& start, const std::string& measurement) {
     std::chrono::duration<float> elapsed = chrono_time::now()- start;
     std::cout << std::left  << std::setw(30) << measurement << ": " 

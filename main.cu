@@ -47,7 +47,7 @@ int main(int argc, char** args) {
     size_t MAX_DATA_CHUNK_SIZE = 24500; // In MB
 
     size_t NB_FRAMES_CHUNK = get_chunk_frame_nb(MAX_DATA_CHUNK_SIZE, N_atoms, N_dims, N_frames);
-    size_t SQ_SUBMATRIX_SIZE = NB_FRAMES_CHUNK / 2;
+    size_t SQ_SUBMATRIX_SIZE = get_optimal_tile_size(MAX_DATA_CHUNK_SIZE, N_atoms, N_dims, N_frames);
     size_t NB_ROW_ITERATIONS = (size_t) std::floor( ( N_frames - 1 ) / SQ_SUBMATRIX_SIZE ) + 1;
     size_t RMSD_LOOPS_NEEDED = (size_t) NB_ROW_ITERATIONS * (NB_ROW_ITERATIONS + 1) / 2;
     

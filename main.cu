@@ -1,13 +1,8 @@
 /*
     Compile with:
-<<<<<<< HEAD
     
     nvcc -ccbin /usr/bin/g++-12 -std=c++11 -O3 --use_fast_math -Xcompiler -fopenmp \
     main.cu FileUtils.cpp gpu.cu utils.cu \
-=======
-    nvcc -ccbin /usr/bin/g++-12 -std=c++11 -O3 \
-    main.cu FileUtils.cpp gpu.cu \
->>>>>>> chunks
     -I/usr/local/cuda/include \
     -L/usr/local/cuda/lib64 -lcudart \
     -lchemfiles \
@@ -23,359 +18,14 @@
 #include "gpu.cuh"
 #include <cuda_runtime.h>
 #include <stdio.h>
-<<<<<<< HEAD
-#include <iomanip>
-#include "utils.cuh"
-#include <omp.h>
-
-
-// CUDA error checking macro
-#define CUDA_CHECK(call) \
-do { \
-    cudaError_t err = call; \
-    if (err != cudaSuccess) { \
-        fprintf(stderr, "CUDA error at %s:%d: %s\n", \
-                __FILE__, __LINE__, cudaGetErrorString(err)); \
-        exit(EXIT_FAILURE); \
-    } \
-} while(0)
-
-int main() {
-   
-    cudaEvent_t evStart, evStop, evTotalStart, evTotalStop;
-    CUDA_CHECK(cudaEventCreate(&evStart));
-    CUDA_CHECK(cudaEventCreate(&evStop));
-    CUDA_CHECK(cudaEventCreate(&evTotalStart));
-    CUDA_CHECK(cudaEventCreate(&evTotalStop));
-
-    // TODO: parsing arguments
-    const int MAX_ITER = 50;
-    const int K_MIN = 2;
-    const int K_MAX = 50;
-    const int NB_TRIAL = 5;
-
-    FileUtils file; 
-
-    std::cout << file << std::endl;
-
-    size_t N_snapshots = 50000;
-    // size_t N_snapshots = file.getN_snapshots();
-    size_t N_atoms  = file.getN_atoms();
-    size_t N_dims   = file.getN_dims();
-
-    std::cout << "Processing " << N_snapshots << " snapshots with " 
-              << N_atoms << " atoms each" << std::endl;
-
-    // Load and reorder into X,Y,Z blocks
-    // TODO: This part is slow and might be done as preprocessing
-    float* reordered_file_host = file.loadData(N_snapshots);
-    file.reorderByLine(reordered_file_host, N_snapshots);
-
-    size_t total_size = N_snapshots * N_atoms * N_dims * sizeof(float);    
-
-    // Copy reordered CPU → GPU
-    float* reordered_file_device;
-    CUDA_CHECK(cudaMalloc(&reordered_file_device, total_size));
-    CUDA_CHECK(cudaEventRecord(evTotalStart));
-
-    float t_transfer_host_to_device = 0.f;
-    CUDA_CHECK(cudaEventRecord(evStart));
-    CUDA_CHECK(cudaMemcpy(reordered_file_device, reordered_file_host, total_size, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaEventRecord(evStop));
-    CUDA_CHECK(cudaEventSynchronize(evStop));
-    CUDA_CHECK(cudaEventElapsedTime(&t_transfer_host_to_device, evStart, evStop));
-
-
-    std::cout << "Copied " << (total_size / (1024.0*1024.0)) 
-              << " MB to GPU" << std::endl;
-
-    // Allocate RMSD matrix
-    size_t rmsd_elems = ((size_t)N_snapshots * ((size_t)N_snapshots - 1)) / 2;
-    size_t size_rmsd  = rmsd_elems * sizeof(float);
-    float* rmsd_device;
-    CUDA_CHECK(cudaMalloc(&rmsd_device, size_rmsd));
-    CUDA_CHECK(cudaMemset(rmsd_device, 0, size_rmsd));
-    
-    std::cout << "Allocated " << (size_rmsd / (1024.0*1024.0)) 
-              << " MB for RMSD matrix" << std::endl;
-
-    dim3 threads(16, 16);
-    dim3 blocks((N_snapshots + threads.x - 1) / threads.x, 
-                (N_snapshots + threads.y - 1) / threads.y);
-
-    std::cout << "\nKernel Start" << std::endl;
-    float t_kernel = 0.f;
-    CUDA_CHECK(cudaEventRecord(evStart));
-    RMSD<<<blocks, threads>>>(reordered_file_device, N_snapshots, N_atoms, rmsd_device);
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
-    CUDA_CHECK(cudaFree(reordered_file_device));
-
-    CUDA_CHECK(cudaEventRecord(evStop));
-
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaEventSynchronize(evStop));
-    CUDA_CHECK(cudaEventElapsedTime(&t_kernel, evStart, evStop));
-
-    std::cout << "Kernel Finished" << std::endl;
-
-    // Copy RMSD matrix back to host
-    float t_transfer_device_to_host = 0.f;
-
-    float* rmsd_host = new float[rmsd_elems];
-    CUDA_CHECK(cudaEventRecord(evStart));
-    CUDA_CHECK(cudaMemcpy(rmsd_host, rmsd_device, size_rmsd, cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaEventRecord(evStop));
-    CUDA_CHECK(cudaEventSynchronize(evStop));
-    CUDA_CHECK(cudaEventElapsedTime(&t_transfer_device_to_host, evStart, evStop));
-
-    // ==============================================================
-    // MAIN ANALYSIS: Scan K from K_MIN to K_MAX
-    // ==============================================================
-
-    std::cout << "\n" << std::string(70, '=') << std::endl;
-    std::cout << "DAVIES-BOULDIN INDEX ANALYSIS (K = " << K_MIN 
-            << " to " << K_MAX << ")" << std::endl;
-    std::cout << std::string(70, '=') << std::endl;
-
-    // Storage for results - DECLARE ONLY ONCE
-    std::vector<int> K_values;
-    std::vector<float> db_kmedoids;
-    std::vector<float> db_random;
-
-    std::cout << "\n"
-            << std::setw(4)  << "K"
-            << std::setw(16) << "DB_KMedoids"
-            << std::setw(16) << "DB_Random"
-            << std::setw(16) << "Difference"
-            << std::setw(14) << "Result"
-            << '\n';
-    std::cout << std::string(4+16+16+16+14, '-') << '\n';
-
-    std::cout << std::fixed << std::setprecision(6);
-
-    // Pre-allocate for thread safety
-    int num_K = K_MAX - K_MIN + 1;
-    K_values.resize(num_K);
-    db_kmedoids.resize(num_K);
-    db_random.resize(num_K);
-
-    double clustering_start = omp_get_wtime();
-
-    #pragma omp parallel for schedule(dynamic)
-    for (int k_idx = 0; k_idx < num_K; ++k_idx) {
-        int K = K_MIN + k_idx;
-        
-        float best_db_km = 1e30f;
-        float best_rd_db_km = 1e30f;
-
-        int* best_centroids = new int[K];
-        int* best_clusters  = new int[N_snapshots];
-
-        for (int trial = 0; trial < NB_TRIAL; trial++) {
-
-            int* init_centroids = new int[K];
-            int* km_centroids   = new int[K];
-            int* km_clusters    = new int[N_snapshots];
-
-            pickKMedoidsPlusPlus(N_snapshots, K, rmsd_host, init_centroids);
-
-            float db_km_trial = runKMedoidsInit(
-                N_snapshots, K, rmsd_host, MAX_ITER,
-                init_centroids,
-                km_centroids,
-                km_clusters
-            );
-
-            if (db_km_trial < best_db_km) {
-                best_db_km = db_km_trial;
-                memcpy(best_centroids, km_centroids, K * sizeof(int));
-                memcpy(best_clusters, km_clusters, N_snapshots * sizeof(int));
-            }
-
-            float db_rand = runRandomClusterAssignment(N_snapshots, K, rmsd_host);
-
-            if (db_rand < best_rd_db_km) {
-                best_rd_db_km = db_rand;
-            }
-
-            delete[] init_centroids;
-            delete[] km_centroids;
-            delete[] km_clusters;
-        }
-
-        float diff = best_rd_db_km - best_db_km;
-
-        // Store results in pre-allocated vectors (thread-safe)
-        K_values[k_idx] = K;
-        db_kmedoids[k_idx] = best_db_km;
-        db_random[k_idx] = best_rd_db_km;
-
-        // Print with critical section to avoid interleaved output
-        #pragma omp critical
-        {
-            std::cout
-                << std::setw(4)  << K
-                << std::setw(16) << best_db_km
-                << std::setw(16) << best_rd_db_km
-                << std::setw(16) << diff
-                << std::setw(14) << (diff > 0 ? "Better" : "Worse")
-                << '\n';
-        }
-
-        delete[] best_centroids;
-        delete[] best_clusters;
-    }
-
-    double clustering_end = omp_get_wtime();
-    double clustering_time = clustering_end - clustering_start;
-
-    std::cout << std::string(70, '=') << std::endl;
-    std::cout << "Clustering analysis time: " << clustering_time << " s" << std::endl;
-    
-    std::cout << std::string(70, '=') << std::endl;
-    
-    // ==============================================================
-    // Save results to CSV for plotting
-    // ==============================================================
-    
-    std::ofstream csv_out("output/db_index_vs_K.csv");
-    csv_out << "K,DB_KMedoids,DB_Random,Difference\n";
-    for (size_t i = 0; i < K_values.size(); i++) {
-        csv_out << K_values[i] << "," 
-                << db_kmedoids[i] << "," 
-                << db_random[i] << ","
-                << (db_random[i] - db_kmedoids[i]) << "\n";
-    }
-    csv_out.close();
-    
-    std::cout << "\n✓ Results saved to output/db_index_vs_K.csv" << std::endl;
-    
-    // ==============================================================
-    // Find optimal K
-    // ==============================================================
-    
-    auto min_it = std::min_element(db_kmedoids.begin(), db_kmedoids.end());
-    int optimal_K_db = K_values[std::distance(db_kmedoids.begin(), min_it)];
-    float optimal_db = *min_it;
-    
-    std::cout << "\n" << std::string(70, '=') << std::endl;
-    std::cout << "OPTIMAL K ANALYSIS" << std::endl;
-    std::cout << std::string(70, '=') << std::endl;
-    std::cout << "Optimal K (lowest DB index): " << optimal_K_db << std::endl;
-    std::cout << "DB Index at optimal K: " << optimal_db << std::endl;
-    
-    // Check if K-medoids consistently beats random
-    int better_count = 0;
-    for (size_t i = 0; i < K_values.size(); i++) {
-        if (db_kmedoids[i] < db_random[i]) better_count++;
-    }
-    
-    float percent_better = 100.0f * better_count / K_values.size();
-    std::cout << "\nK-medoids beats random: " << better_count << "/" 
-              << K_values.size() << " times (" << percent_better << "%)" << std::endl;
-    
-    if (percent_better < 50) {
-        std::cout << "\n⚠️  WARNING: K-medoids rarely beats random clustering!" << std::endl;
-        std::cout << "This suggests your data may not have well-separated clusters." << std::endl;
-        std::cout << "Consider:" << std::endl;
-        std::cout << "  - Using fewer atoms (backbone only)" << std::endl;
-        std::cout << "  - Different distance metric" << std::endl;
-        std::cout << "  - PCA or other dimensionality reduction first" << std::endl;
-    }
-    
-    // ==============================================================
-    // Run detailed analysis at optimal K
-    // ==============================================================
-    
-    std::cout << "\n" << std::string(70, '=') << std::endl;
-    std::cout << "DETAILED ANALYSIS AT OPTIMAL K = " << optimal_K_db << std::endl;
-    std::cout << std::string(70, '=') << std::endl;
-    
-    int* final_centroids = new int[optimal_K_db];
-    int* final_clusters = new int[N_snapshots];
-    
-    pickKMedoidsPlusPlus(N_snapshots, optimal_K_db, rmsd_host, final_centroids);
-
-    float final_db = runKMedoidsInit(
-        N_snapshots, optimal_K_db, rmsd_host, MAX_ITER,
-        final_centroids,
-        final_centroids,
-        final_clusters
-    );
-
-    std::cout << "\nFinal centroids (snapshot indices):" << std::endl;
-    for (int k = 0; k < optimal_K_db; k++) {
-        std::cout << "  Cluster " << k << ": snapshot " << final_centroids[k] << std::endl;
-    }
-    
-    // Compute cluster sizes
-    std::vector<int> cluster_sizes(optimal_K_db, 0);
-    for (int i = 0; i < N_snapshots; i++) {
-        cluster_sizes[final_clusters[i]]++;
-    }
-    
-    std::cout << "\nCluster sizes:" << std::endl;
-    for (int k = 0; k < optimal_K_db; k++) {
-        float percent = 100.0f * cluster_sizes[k] / N_snapshots;
-        std::cout << "  Cluster " << k << ": " << cluster_sizes[k] 
-                  << " snapshots (" << percent << "%)" << std::endl;
-    }
-    
-    // Save centroids to file
-    std::ofstream cent_out("output/optimal_centroids.txt");
-    cent_out << "# Optimal K = " << optimal_K_db << "\n";
-    cent_out << "# Davies-Bouldin Index = " << final_db << "\n";
-    cent_out << "# Cluster\tSnapshot_Index\tSize\n";
-    for (int k = 0; k < optimal_K_db; k++) {
-        cent_out << k << "\t" << final_centroids[k] << "\t" 
-                 << cluster_sizes[k] << "\n";
-    }
-    cent_out.close();
-    
-    std::cout << "\n✓ Optimal clustering results saved to output/optimal_centroids.txt" 
-              << std::endl;
-
-    // Cleanup
-    delete[] reordered_file_host;
-    delete[] rmsd_host;
-    delete[] final_centroids;
-    delete[] final_clusters;
-    CUDA_CHECK(cudaFree(rmsd_device));
-
-    CUDA_CHECK(cudaEventRecord(evTotalStop));
-    CUDA_CHECK(cudaEventSynchronize(evTotalStop));
-
-    float total_ms = 0.0f;
-    CUDA_CHECK(cudaEventElapsedTime(&total_ms, evTotalStart, evTotalStop));
-
-    std::cout << "\n" << std::string(70, '=') << std::endl;
-    std::cout << "PERFORMANCE" << std::endl;
-    std::cout << std::string(70, '=') << std::endl;
-
-    std::cout << "Host to device copy time   : " << t_transfer_host_to_device   / 1000.0f << " s" << std::endl;
-    std::cout << "Kernel time     : " << t_kernel / 1000.0f << " s" << std::endl;
-    std::cout << "Device to Host copy time   : " << t_transfer_device_to_host   / 1000.0f << " s" << std::endl;
-    std::cout << "Clustering time : " << clustering_time << " s" << std::endl;
-    std::cout << "--------------------------------------" << std::endl;
-    std::cout << "Total execution: " << total_ms / 1000.0f << " s" << std::endl;
-
-    CUDA_CHECK(cudaEventDestroy(evStart));
-    CUDA_CHECK(cudaEventDestroy(evStop));
-    CUDA_CHECK(cudaEventDestroy(evTotalStart));
-    CUDA_CHECK(cudaEventDestroy(evTotalStop));
-    CUDA_CHECK(cudaDeviceReset());
-=======
 #include <chrono>
 #include <iomanip>
-#include <utils.h>
-
+#include "utils.cuh"
 
 int main(int argc, char** args) {
 
     // Time measurements
     chrono_type global_start = chrono_time::now();
-
 
     int K = 10;
     int MAX_ITER = 50;
@@ -384,43 +34,47 @@ int main(int argc, char** args) {
     if (argc >= 2) {
         file_name = args[1];
     } else {
-        std::cerr<< "Argument for dataset binary file missing, check the Makefile" << std::endl;
-        throw std::invalid_argument("Requested frames exceed available frames");
+        std::cerr << "Usage: " << args[0] << " <dataset.bin>" << std::endl;
+        std::cerr << "Example: " << args[0] << " data/trajectory.bin" << std::endl;
+        return 1;
     }
     FileUtils file(file_name); 
 
-    // std::cout << file << std::endl;
-
     size_t N_frames = 10000;
-    // size_t N_frames = file.getN_frames();
     size_t N_atoms = file.getN_atoms();
     size_t N_dims = file.getN_dims();
 
     size_t MAX_DATA_CHUNK_SIZE = 650; // In MB
 
     int NB_FRAMES_CHUNK = get_chunk_frame_nb(MAX_DATA_CHUNK_SIZE, N_atoms, N_dims, N_frames);
-    size_t NB_CHUNKS = ( (N_frames-1) / NB_FRAMES_CHUNK ) + 1;
     int SQ_SUBMATRIX_SIZE = NB_FRAMES_CHUNK / 2;
-    // int SQ_SUBMATRIX_CARD = SQ_SUBMATRIX_SIZE * SQ_SUBMATRIX_SIZE;
     int NB_ROW_ITERATIONS = (int) std::floor( ( N_frames - 1 ) / SQ_SUBMATRIX_SIZE ) + 1;
     int RMSD_LOOPS_NEEDED = (int) NB_ROW_ITERATIONS * (NB_ROW_ITERATIONS + 1) / 2;
     
-    std::cout << "Taille maximale d'un chunk : " << MAX_DATA_CHUNK_SIZE << "MB\n";
-    std::cout << "Nombre de frames max dans un chunk : " << NB_FRAMES_CHUNK << "\n";
-    std::cout << "Taille d'une sous-matrice de calcul : " << SQ_SUBMATRIX_SIZE << "\n";
-    std::cout << "Nombre de tours : " << RMSD_LOOPS_NEEDED << "\n";
+    std::cout << "\n" << std::string(70, '=') << std::endl;
+    std::cout << "RMSD COMPUTATION CONFIGURATION" << std::endl;
+    std::cout << std::string(70, '=') << std::endl;
+    std::cout << "Max chunk size           : " << MAX_DATA_CHUNK_SIZE << " MB\n";
+    std::cout << "Max frames per chunk     : " << NB_FRAMES_CHUNK << "\n";
+    std::cout << "Submatrix tile size      : " << SQ_SUBMATRIX_SIZE << "\n";
+    std::cout << "Number of RMSD iterations: " << RMSD_LOOPS_NEEDED << "\n";
+    std::cout << "Total frames to process  : " << N_frames << "\n";
+    std::cout << "Number of atoms          : " << N_atoms << "\n";
+    std::cout << std::string(70, '=') << std::endl << std::endl;
 
     // Load and reorder into X,Y,Z blocks
     float* frame = file.loadData(N_frames);
 
-    float* rmsdHost = new float[N_frames*N_frames];
+    // Allocate PACKED upper triangle matrix
+    size_t rmsd_size = (size_t)N_frames * (N_frames - 1) / 2;
+    float* rmsdHost = new float[rmsd_size];
 
     int row_begin = 0;
 
-    for(int i=0; i < RMSD_LOOPS_NEEDED; ++i) {
-        int col_begin = col_index_parcours(i,NB_ROW_ITERATIONS - 1) * SQ_SUBMATRIX_SIZE;
-        int col_end = std::min(col_begin + SQ_SUBMATRIX_SIZE,(int) N_frames);
-        int row_end = std::min(row_begin + SQ_SUBMATRIX_SIZE,(int) N_frames);
+    for(int iter=0; iter < RMSD_LOOPS_NEEDED; ++iter) {
+        int col_begin = col_index_parcours(iter, NB_ROW_ITERATIONS - 1) * SQ_SUBMATRIX_SIZE;
+        int col_end = std::min(col_begin + SQ_SUBMATRIX_SIZE, (int)N_frames);
+        int row_end = std::min(row_begin + SQ_SUBMATRIX_SIZE, (int)N_frames);
 
         int size_row = row_end - row_begin;
         int size_col = col_end - col_begin;
@@ -434,22 +88,14 @@ int main(int argc, char** args) {
             nb_frames_subset = size_col + size_row;
         }
 
-        std::cout << "========================== " << "Iteration : " << i << " ==========================" << "\n";
-
-        std::cout << "col_begin : " << col_begin << "\n";
-        std::cout << "col_end : " << col_end << "\n";
-        std::cout << "row_begin : " << row_begin << "\n";
-        std::cout << "row_end : " << row_end << "\n";
-
-        std::cout << "nb_frames_subset : " << nb_frames_subset << "\n";
+        std::cout << "Iteration " << iter << "/" << RMSD_LOOPS_NEEDED-1 
+                  << " | Tile: [" << row_begin << ":" << row_end << ", " 
+                  << col_begin << ":" << col_end << "] | Frames: " << nb_frames_subset << std::endl;
 
         float* frame_subset = file.getFrameSubset(frame, row_begin, row_end, col_begin, col_end, N_frames);
-
         file.reorderByLine(frame_subset, nb_frames_subset);
 
         size_t total_size = nb_frames_subset * N_atoms * N_dims * sizeof(float);
-
-        measure_seconds(global_start, "Loading source data");
 
         // Copy reordered CPU → GPU
         chrono_type mem_transfer_start = chrono_time::now();
@@ -459,11 +105,11 @@ int main(int argc, char** args) {
 
         // Allocate RMSD matrix
         float* rmsd;
-        size_t size_rmsd = nb_frames_subset * nb_frames_subset * sizeof(float);
+        size_t size_rmsd = (size_t)nb_frames_subset * (nb_frames_subset - 1) / 2 * sizeof(float);
+
         CHECK_SUCCESS(cudaMalloc(&rmsd, size_rmsd), "Allocating rmsd vector on GPU");
 
         cudaDeviceSynchronize();
-        measure_seconds(mem_transfer_start, "CPU to GPU memory transfer");
 
         dim3 threads(16,16);
         dim3 blocks((nb_frames_subset + threads.x - 1) / threads.x, 
@@ -477,65 +123,140 @@ int main(int argc, char** args) {
             rmsd
         );
         CHECK_SUCCESS(cudaDeviceSynchronize(), "RMSD Kernel");
-        measure_seconds(rmsd_kernel_start, "RMSD Kernel");
 
-        float* rmsdSubsetHost = new float[nb_frames_subset*nb_frames_subset];
+        size_t rmsdCount = (size_t)nb_frames_subset * (nb_frames_subset - 1) / 2;
+        float* rmsdSubsetHost = new float[rmsdCount];
         CHECK_SUCCESS(cudaMemcpy(rmsdSubsetHost, rmsd, size_rmsd, cudaMemcpyDeviceToHost), "Memcpy rmsd -> rmsdSubsetHost");
 
-        for(int i=row_begin; i < row_end; ++i) {
-            for(int j=col_begin; j < col_end; ++j) {
+        // Reconstruct into packed upper triangle format
+        for(int i = row_begin; i < row_end; ++i) {
+            for(int j = col_begin; j < col_end; ++j) {
+                
+                // Only fill upper triangle (j > i)
+                if (j <= i) continue;
 
-                int r = (i - row_begin);
-                int c = (col_begin == row_begin)
-                ? (j - col_begin)
-                : (size_row + (j - col_begin));
+                int ii, jj;
+                
+                if (col_begin == row_begin) {
+                    // Diagonal tile: both indices from same range
+                    ii = i - row_begin;
+                    jj = j - col_begin;
+                } else {
+                    // Off-diagonal tile: i from row range, j from col range
+                    ii = i - row_begin;              // Index in first part (0 to size_row-1)
+                    jj = size_row + (j - col_begin); // Index in second part
+                }
 
-                float v = rmsdSubsetHost[r * nb_frames_subset + c];
+                // Ensure ii < jj for upper triangle lookup in subset
+                int a = std::min(ii, jj);
+                int b = std::max(ii, jj);
 
-                rmsdHost[i * (int)N_frames + j] = v;
-                rmsdHost[j * (int)N_frames + i] = v;
+                size_t subset_idx = (size_t)a * nb_frames_subset
+                                  - ((size_t)a * ((size_t)a + 1)) / 2
+                                  + (b - a - 1);
 
-                // rmsdHost[i*static_cast<int>(N_frames) + j] = rmsdSubsetHost[(i-row_begin)*nb_frames_subset + j - col_begin];
-                // rmsdHost[j*static_cast<int>(N_frames) + i] = rmsdSubsetHost[(i-row_begin)*nb_frames_subset + j - col_begin];
+                if (subset_idx >= rmsdCount) {
+                    std::cerr << "ERROR: Index overflow " << subset_idx << " >= " << rmsdCount << std::endl;
+                    continue;
+                }
+
+                float v = rmsdSubsetHost[subset_idx];
+
+                // Store in packed upper triangle of full matrix
+                // Global indices: i < j (already checked above)
+                size_t global_idx = (size_t)i * N_frames
+                                  - ((size_t)i * ((size_t)i + 1)) / 2
+                                  + (j - i - 1);
+
+                rmsdHost[global_idx] = v;
             }
         }
 
-        if(col_end == (int) N_frames) {
+        if(col_end == (int)N_frames) {
             row_begin += SQ_SUBMATRIX_SIZE;
-        };
+        }
 
+        delete[] rmsdSubsetHost;
+        delete[] frame_subset;
         cudaFree(frameGPU);
         cudaFree(rmsd);
-
     }
 
+    std::cout << "\n" << std::string(70, '=') << std::endl;
+    std::cout << "RMSD COMPUTATION COMPLETE" << std::endl;
+    std::cout << std::string(70, '=') << std::endl;
+    measure_seconds(global_start, "Total RMSD computation time");
+    std::cout << std::endl;
+
+    // =========================================================================
+    // CLUSTERING
+    // =========================================================================
+    
+    std::cout << std::string(70, '=') << std::endl;
+    std::cout << "K-MEDOIDS CLUSTERING (K=" << K << ", MAX_ITER=" << MAX_ITER << ")" << std::endl;
+    std::cout << std::string(70, '=') << std::endl;
+    
     chrono_type clustering_loop_start = chrono_time::now();
-    // Pick first K unique indices
+    
     int* centroids = new int[K];
     int* clusters = new int[N_frames];
 
     float db_index = runKMedoids(N_frames, K, rmsdHost, MAX_ITER, centroids, clusters);
-    // float db_index = k_analysis(rmsdHost, N_frames, MAX_ITER);
+    
+    measure_seconds(clustering_loop_start, "K-medoids clustering time");
+    std::cout << std::endl;
 
-    std::cout << "Davies–Bouldin index: " << db_index << std::endl;
-
-    measure_seconds(clustering_loop_start, "Clustering loop");
-    measure_seconds(global_start, "Entire program");
-
-    // Print db for random clustering
+    // =========================================================================
+    // RESULTS
+    // =========================================================================
+    
+    std::cout << std::string(70, '=') << std::endl;
+    std::cout << "CLUSTERING RESULTS" << std::endl;
+    std::cout << std::string(70, '=') << std::endl;
+    
+    std::cout << std::fixed << std::setprecision(6);
+    std::cout << "K-medoids Davies-Bouldin Index: " << db_index << std::endl;
+    
+    // Compute and display cluster sizes
+    std::vector<int> cluster_sizes(K, 0);
+    for (int i = 0; i < N_frames; i++) {
+        cluster_sizes[clusters[i]]++;
+    }
+    
+    std::cout << "\nCluster centroids and sizes:" << std::endl;
+    for (int k = 0; k < K; k++) {
+        float percent = 100.0f * cluster_sizes[k] / N_frames;
+        std::cout << "  Cluster " << std::setw(2) << k 
+                  << " | Centroid: frame " << std::setw(6) << centroids[k] 
+                  << " | Size: " << std::setw(6) << cluster_sizes[k] 
+                  << " (" << std::setw(5) << std::setprecision(2) << percent << "%)" << std::endl;
+    }
+    
+    // Random clustering baseline
+    std::cout << "\n" << std::string(70, '-') << std::endl;
+    std::cout << "BASELINE COMPARISON" << std::endl;
+    std::cout << std::string(70, '-') << std::endl;
+    
     float random_db_index = runRandomClustering(N_frames, K, rmsdHost);
-    std::cout << "Random Davies–Bouldin index: " << random_db_index << std::endl;
+    std::cout << std::fixed << std::setprecision(6);
+    std::cout << "Random clustering Davies-Bouldin Index: " << random_db_index << std::endl;
+    
+    float improvement = ((random_db_index - db_index) / random_db_index) * 100.0f;
+    std::cout << "\nK-medoids improvement over random: " 
+              << std::setprecision(2) << improvement << "%" 
+              << (improvement > 0 ? " ✓ BETTER" : " ✗ WORSE") << std::endl;
+    
+    std::cout << std::string(70, '=') << std::endl << std::endl;
 
     saveClusters(clusters, N_frames, centroids, K);
+
+    measure_seconds(global_start, "Total program execution time");
 
     // Cleanup
     delete[] frame;
     delete[] centroids;
     delete[] rmsdHost;
     delete[] clusters;
-    // cudaFree(frameGPU);
-    // cudaFree(rmsd);
->>>>>>> chunks
 
     return 0;
 }

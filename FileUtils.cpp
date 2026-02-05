@@ -251,32 +251,6 @@ float* FileUtils::getFrameSubset(float* frames, int row_begin, int row_end, int 
     return frame_subset;
 }
 
-/*
-* Writes clustering result's centroid and cluster indices into a binary file.
-* These indices are used to read actual molecule shapes 
-* stored in the original dataset file.
-* The file layout is as follows:
-* - Metadata: sizeof(int) bytes storing K | sizeof(int) bytes storing N_frames
-* - Data: K*sizeof(int) bytes storing centroids indices | N_frames*sizeof(int) bytes storing cluster
-* indices of each frame
-*/
-void saveClusters(const int* clusters, int N_frames, const int* centroids, int K) {
-    std::ofstream outFile("output/clusters.bin", std::ios::binary);
-    
-    if (outFile.is_open()) {
-        // metadata
-        outFile.write(reinterpret_cast<const char*>(&K), sizeof(int));
-        outFile.write(reinterpret_cast<const char*>(&N_frames), sizeof(int));
-
-        // Write the arrays
-        outFile.write(reinterpret_cast<const char*>(centroids), K * sizeof(int));
-        outFile.write(reinterpret_cast<const char*>(clusters), N_frames * sizeof(int));
-        
-        outFile.close();
-    }
-
-    std::cout << "Results saved to output/clusters.bin\n";
-}
 
 /*
 * Loads cluster labels from the clusters.bin file.

@@ -26,9 +26,5 @@ public:
     void reorderByLine(float* snapshot_data, const size_t n_subset_snapshots);
 };
 
-// Cluster I/O
-void saveClusters(const int* clusters, int N_snapshots,
-                  const int* centroids, int K);
-
 std::vector<int> loadClusterLabels();
 std::vector<int> loadClusterCentroids();

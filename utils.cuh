@@ -9,44 +9,45 @@
 #include <stdio.h>
 #include <chrono>
 #include <iomanip>
+#include <cmath>
 
-void pickKMedoidsPlusPlus(int N_snapshots, int K, const float* rmsd, int* centroids);
+// alias for the clock type
+using chrono_time = std::chrono::high_resolution_clock;
+using chrono_type = std::chrono::high_resolution_clock::time_point;
 
-void createClusters(
-    int N_snapshots,
-    int K,
-    const float* rmsd,
-    const int* centroids,
-    int* clusters
-);
-
-void updateCentroids(
-    int N_snapshots,
-    int K,
-    const int* clusters,
-    const float* rmsdHost,
-    int* centroids
-);
-
-float daviesBouldinIndex(
-    int N_snapshots,
-    int K,
-    const int* clusters,
-    const int* centroids,
-    const float* rmsd
-);
-
-// Run K-medoids clustering and return DB index
-float runKMedoidsInit(int N_snapshots, int K, const float* rmsdHost,
-                      int MAX_ITER,
-                      const int* init_centroids,
-                      int* final_centroids,
-                      int* final_clusters);
-
-// Run random clustering and return DB index
-float runRandomClusterAssignment(int N_snapshots, int K, const float* rmsdHost);
-
-__host__ __device__
-inline int upper_triangle_index(int i, int j, int N) {
-    return i * N - (i*(i+1))/2 + (j - i - 1);
+// ============================================================================
+// UPPER TRIANGLE INDEXING HELPER (inline - can be in header)
+// ============================================================================
+inline float getRMSD(int i, int j, const float* rmsdPacked, int N_snapshots) {
+    if (i == j) return 0.0f;
+    if (i > j) std::swap(i, j);
+    size_t idx = (size_t)i * N_snapshots 
+               - ((size_t)i * ((size_t)i + 1)) / 2 
+               + (j - i - 1);
+    return rmsdPacked[idx];
 }
+
+// ============================================================================
+// FUNCTION DECLARATIONS (implementations in utils.cu)
+// ============================================================================
+
+// Tiling helper functions
+int trinv(int n);
+int triangle_read(int n);
+int sum_k(int k);
+int col_index_parcours(int i, int bound);
+int get_chunk_frame_nb(size_t max_cap, size_t N_atoms, size_t N_dims, size_t N_frames);
+
+// Timing
+void measure_seconds(const chrono_type& start, const std::string& measurement);
+
+// K-medoids functions
+void pickRandomCentroids(int N_frames, int K, int* centroids);
+void pickKMedoidsPlusPlus(int N_snapshots, int K, const float* rmsd, int* centroids);
+void createClusters(int N_frames, int K, const float* rmsd, const int* centroids, int* clusters);
+void updateCentroids(int N_frames, int K, const int* clusters, const float* rmsd, int* centroids);
+float daviesBouldinIndex(int N_frames, int K, const int* clusters, const int* centroids, const float* rmsd);
+float runKMedoids(int N_frames, int K, const float* rmsd, int MAX_ITER, int* centroids, int* clusters);
+float runRandomClustering(int N_frames, int K, const float* rmsd);
+float k_analysis(float* rmsd, size_t N_frames, int MAX_ITER, int K_MIN = 2, int K_MAX = 50);
+void saveClusters(const int* clusters, int N_frames, const int* centroids, int K);

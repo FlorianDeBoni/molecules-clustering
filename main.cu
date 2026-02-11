@@ -106,9 +106,13 @@ int main(int argc, char** args) {
 
     measure_seconds(clustering_loop_start, "==> Clustering memory setup");
 
+    // Assignment step params
     dim3 clusteringThreads(1024);
     dim3 clusteringBlocks(1 + ((N_frames - 1) / (threads.x)));
+
+    // Centroids update step params
     dim3 threadsPerClusterBlock(512);
+    dim3 reducingBlocks(K);
     size_t sharedMemSize = threadsPerClusterBlock.x * (sizeof(float) + sizeof(int));
 
     for (int iter = 0; iter < MAX_ITER; iter++) {

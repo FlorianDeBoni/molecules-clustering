@@ -459,7 +459,8 @@ void runKMedoidsGPU(
     int best_cluster = 0;
     float best_d = HUGE_VALF;
     for (int k = 0; k<K; k++) {
-        float curr_distance = rmsd[N_frames * centroidsGPU[k] + frame_id];
+        size_t distance_idx = (size_t) N_frames * centroidsGPU[k] + frame_id;
+        float curr_distance = rmsd[distance_idx];
         if (curr_distance < best_d) {
             best_cluster = k;
             best_d = curr_distance;
@@ -477,7 +478,8 @@ void runKMedoidsGPU(
         if (best_cluster == clustersGPU[j]) {
             // j in the same cluster as frame_id
             // not always a coalescent access (j is different for other threads)
-            cost += rmsd[N_frames * j + frame_id];
+            size_t idx = (size_t) N_frames * j + frame_id;
+            cost += rmsd[idx];
             member_count += 1;
         }
     }

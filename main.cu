@@ -48,7 +48,7 @@ int main(int argc, char** args) {
     file.readSnapshotsFastInPlace(0, N_frames - 1, all_data);
     std::cout << "Loaded " << N_frames * N_atoms * N_dims * sizeof(float) / (1024*1024) << " MiB into CPU RAM." << std::endl;
 
-    const size_t MAX_DATA_CHUNK_SIZE = 500; // In MB
+    const size_t MAX_DATA_CHUNK_SIZE = 3000; // In MB
     const size_t NB_FRAMES_PER_CHUNK = get_chunk_frame_nb(MAX_DATA_CHUNK_SIZE, N_atoms, N_dims);
     const size_t NB_ROW_ITERATIONS = (size_t) std::ceil((double)N_frames / NB_FRAMES_PER_CHUNK);
     const size_t RMSD_LOOPS_NEEDED = NB_ROW_ITERATIONS * (NB_ROW_ITERATIONS + 1) / 2;
@@ -81,7 +81,7 @@ int main(int argc, char** args) {
     dim3 threads(16,16);
     size_t size_rmsd = NB_FRAMES_PER_CHUNK * NB_FRAMES_PER_CHUNK * sizeof(float);
 
-
+    std::cout << "\n" << std::string(70, '=') << std::endl; std::cout << "RMSD COMPUTATION START" << std::endl; std::cout << std::string(70, '=') << std::endl;
     for (size_t row = 0; row < NB_ROW_ITERATIONS; ++row) {
         size_t start_row = row * NB_FRAMES_PER_CHUNK;
         size_t stop_row  = std::min(start_row + NB_FRAMES_PER_CHUNK, N_frames);
@@ -138,6 +138,21 @@ int main(int argc, char** args) {
     CHECK_SUCCESS(cudaFree(d_rmsd), "Freeing RMSD vector on GPU");
     CHECK_SUCCESS(cudaFree(d_targets), "Freeing Targets on GPU");
 
+    // Calculate size for upper triangle without diagonal
+    size_t upper_triangle_size = (N_frames * (N_frames - 1)) / 2;
+    float* rmsdUpperTriangle = new float[upper_triangle_size];
+
+    // Copy upper triangle without diagonal
+    size_t idx = 0;
+    for (size_t i = 0; i < N_frames; ++i) {
+        for (size_t j = i + 1; j < N_frames; ++j) {
+            size_t global_idx = i * N_frames + j;
+            rmsdUpperTriangle[idx++] = rmsdHostAll[global_idx];
+        }
+    }
+
+    delete[] rmsdHostAll;
+
     int K = 10;
     int MAX_ITER = 50;
 
@@ -160,7 +175,7 @@ int main(int argc, char** args) {
     int* centroids = new int[K];
     int* clusters = new int[N_frames];
 
-    float db_index = runKMedoids(N_frames, K, rmsdHostAll, MAX_ITER, centroids, clusters);
+    float db_index = runKMedoids(N_frames, K, rmsdUpperTriangle, MAX_ITER, centroids, clusters);
     
     measure_seconds(clustering_loop_start, "K-medoids clustering time");
     std::cout << std::endl;
@@ -196,7 +211,7 @@ int main(int argc, char** args) {
     std::cout << "BASELINE COMPARISON" << std::endl;
     std::cout << std::string(70, '-') << std::endl;
     
-    float random_db_index = runRandomClustering(N_frames, K, rmsdHostAll);
+    float random_db_index = runRandomClustering(N_frames, K, rmsdUpperTriangle);
     std::cout << std::fixed << std::setprecision(6);
     std::cout << "Random clustering Davies-Bouldin Index: " << random_db_index << std::endl;
     
@@ -213,7 +228,7 @@ int main(int argc, char** args) {
 
     // Cleanup
     delete[] centroids;
-    delete[] rmsdHostAll;
+    delete[] rmsdUpperTriangle;
     delete[] clusters;
 
     return 0;

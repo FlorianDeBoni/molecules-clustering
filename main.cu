@@ -42,22 +42,22 @@ int main(int argc, char** args) {
 
     // std::cout << file << std::endl;
 
-    size_t N_frames = 10000;
+    size_t N_frames = 15000;
     // size_t N_frames = file.getN_frames();
     size_t N_atoms = file.getN_atoms();
     size_t N_dims = file.getN_dims();
 
-    size_t MAX_DATA_CHUNK_SIZE = 650; // In MB
+    size_t MAX_DATA_CHUNK_SIZE = 1500; // In MB
 
     int NB_FRAMES_CHUNK = get_chunk_frame_nb(MAX_DATA_CHUNK_SIZE, N_atoms, N_dims, N_frames);
-    size_t NB_CHUNKS = ( (N_frames-1) / NB_FRAMES_CHUNK ) + 1;
     int SQ_SUBMATRIX_SIZE = NB_FRAMES_CHUNK / 2;
     // int SQ_SUBMATRIX_CARD = SQ_SUBMATRIX_SIZE * SQ_SUBMATRIX_SIZE;
     int NB_ROW_ITERATIONS = (int) std::floor( ( N_frames - 1 ) / SQ_SUBMATRIX_SIZE ) + 1;
     int RMSD_LOOPS_NEEDED = (int) NB_ROW_ITERATIONS * (NB_ROW_ITERATIONS + 1) / 2;
     
+    std::cout << "\n";
     std::cout << "Taille maximale d'un chunk : " << MAX_DATA_CHUNK_SIZE << "MB\n";
-    std::cout << "Nombre de frames max dans un chunk : " << NB_FRAMES_CHUNK << "\n";
+    // std::cout << "Nombre de frames max dans un chunk : " << NB_FRAMES_CHUNK << "\n";
     std::cout << "Taille d'une sous-matrice de calcul : " << SQ_SUBMATRIX_SIZE << "\n";
     std::cout << "Nombre de tours : " << RMSD_LOOPS_NEEDED << "\n";
 
@@ -67,6 +67,9 @@ int main(int argc, char** args) {
     float* rmsdHost = new float[N_frames*N_frames];
 
     int row_begin = 0;
+
+    // Pour monitor l'utilisation en mémoire du GPU toutes les secondes :
+    // nvidia-smi --query-gpu=timestamp,memory.used,memory.total,utilization.gpu --format=csv -l 1 
 
     for(int i=0; i < RMSD_LOOPS_NEEDED; ++i) {
         int col_begin = col_index_parcours(i,NB_ROW_ITERATIONS - 1) * SQ_SUBMATRIX_SIZE;

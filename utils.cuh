@@ -21,9 +21,9 @@ using chrono_type = std::chrono::high_resolution_clock::time_point;
 inline float getRMSD(int i, int j, const float* rmsdPacked, int N_snapshots) {
     if (i == j) return 0.0f;
     if (i > j) std::swap(i, j);
-    size_t idx = (size_t)i * (N_snapshots - 1)
-           - ((size_t)i * ((size_t)i - 1)) / 2
-           + (j - 1);
+    size_t idx = (size_t)i * N_snapshots
+           - ((size_t)i * ((size_t)i + 1)) / 2
+           + (j - i - 1);
     return rmsdPacked[idx];
 }
 

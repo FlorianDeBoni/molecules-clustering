@@ -39,7 +39,7 @@ int main(int argc, char** args) {
 
     FileUtils file(file_name); 
 
-    size_t N_frames = 20001;
+    size_t N_frames = 50000;
     size_t N_atoms  = file.getN_atoms();
     size_t N_dims   = file.getN_dims();
 
@@ -48,7 +48,7 @@ int main(int argc, char** args) {
     file.readSnapshotsFastInPlace(0, N_frames - 1, all_data);
     std::cout << "Loaded " << N_frames * N_atoms * N_dims * sizeof(float) / (1024*1024) << " MiB into CPU RAM." << std::endl;
 
-    const size_t MAX_DATA_CHUNK_SIZE = 3000; // In MB
+    const size_t MAX_DATA_CHUNK_SIZE = 20000; // In MB
     const size_t NB_FRAMES_PER_CHUNK = get_chunk_frame_nb(MAX_DATA_CHUNK_SIZE, N_atoms, N_dims);
     const size_t NB_ROW_ITERATIONS = (size_t) std::ceil((double)N_frames / NB_FRAMES_PER_CHUNK);
     const size_t RMSD_LOOPS_NEEDED = NB_ROW_ITERATIONS * (NB_ROW_ITERATIONS + 1) / 2;
@@ -151,8 +151,30 @@ int main(int argc, char** args) {
         }
     }
 
-    delete[] rmsdHostAll;
+    // Preview of RMSD matrix
+    size_t preview = std::min((size_t)5, N_frames);
+    std::cout << "\nRMSD matrix (first " << preview << "x" << preview << " submatrix):\n";
+    std::cout << std::fixed << std::setprecision(4);
 
+    // Header row
+    std::cout << std::setw(10) << "";
+    for (size_t j = 0; j < preview; ++j)
+        std::cout << std::setw(10) << j;
+    std::cout << "\n";
+
+    // Rows
+    for (size_t i = 0; i < preview; ++i) {
+        std::cout << std::setw(10) << i;
+        for (size_t j = 0; j < preview; ++j) {
+            float val = rmsdHostAll[i * N_frames + j];
+            std::cout << std::setw(10) << val;
+        }
+        std::cout << "\n";
+    }
+    std::cout << "\n";
+
+    delete[] rmsdHostAll;
+    
     int K = 10;
     int MAX_ITER = 50;
 

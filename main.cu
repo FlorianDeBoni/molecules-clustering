@@ -104,8 +104,8 @@ int main(int argc, char** args) {
 
             const size_t nb_frames_subset_targets = stop_col-start_col;
 
-            dim3 blocks((nb_frames_subset_references + threads.x - 1) / threads.x, 
-                        (nb_frames_subset_targets + threads.y - 1) / threads.y);
+            dim3 blocks((nb_frames_subset_targets    + threads.x - 1) / threads.x, 
+                        (nb_frames_subset_references + threads.y - 1) / threads.y);
 
             CHECK_SUCCESS(cudaDeviceSynchronize(), "Ready to launch RMSD Kernel");
 

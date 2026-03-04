@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <vector>
 #include <string.h>
+#include <cstring>
 
 FileUtils::FileUtils(const std::string& file_name) 
     : file_name(file_name), file(file_name, std::ios::binary) 
@@ -190,30 +191,47 @@ void FileUtils::readSnapshotsFastInPlace(size_t start, size_t end, std::vector<f
 
 void FileUtils::extractSnapshotsFastInPlace(
     size_t start,
-    size_t end,                    // exclusive
+    size_t end,
     const std::vector<float>& all_data,
     std::vector<float>& result
 ) {
-    const size_t n_snapshots_data = all_data.size() / (3 * n_atoms);
+    const size_t n_snapshots_data =
+        all_data.size() / (3 * n_atoms);
+
     if (start > end || end > n_snapshots_data)
         throw std::out_of_range("Invalid snapshot range");
+
     if (n_dims != 3)
         throw std::runtime_error("Unsupported dimension count");
 
-    size_t n_extracted_snapshots = end - start;  // exclusive end
-    size_t block_size = n_atoms * n_snapshots_data;
+    const size_t n_extracted_snapshots = end - start;
 
     result.resize(n_extracted_snapshots * n_atoms * 3);
 
     for (size_t c = 0; c < 3; ++c) {
-        const float* coord_block = all_data.data() + c * block_size;
+
+        const float* src_base =
+            all_data.data() +
+            c * (n_atoms * n_snapshots_data) +
+            start;
+
+        float* dst_base =
+            result.data() +
+            c * (n_atoms * n_extracted_snapshots);
 
         for (size_t a = 0; a < n_atoms; ++a) {
-            for (size_t f = 0; f < n_extracted_snapshots; ++f) {
-                size_t idx_file = a * n_snapshots_data + (start + f);
-                size_t idx_out  = f + a * n_extracted_snapshots + c * n_extracted_snapshots * n_atoms;
-                result[idx_out] = coord_block[idx_file];
-            }
+
+            const float* src =
+                src_base + a * n_snapshots_data;
+
+            float* dst =
+                dst_base + a * n_extracted_snapshots;
+
+            memcpy(
+                dst,
+                src,
+                n_extracted_snapshots * sizeof(float)
+            );
         }
     }
 }

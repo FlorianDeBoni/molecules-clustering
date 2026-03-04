@@ -158,9 +158,9 @@ void RMSD(const float* __restrict__ references,
         float sy = targets[1*N_atoms*N_targets_subset + b_targets + snap_idx]-scy;
         float sz = targets[2*N_atoms*N_targets_subset + b_targets + snap_idx]-scz;
 
-        a00+=rx*sx; a01+=rx*sy; a02+=rx*sz;
-        a10+=ry*sx; a11+=ry*sy; a12+=ry*sz;
-        a20+=rz*sx; a21+=rz*sy; a22+=rz*sz;
+        a00+=sx*rx; a01+=sx*ry; a02+=sx*rz;
+        a10+=sy*rx; a11+=sy*ry; a12+=sy*rz;
+        a20+=sz*rx; a21+=sz*ry; a22+=sz*rz;
     }
 
     // Compute M = A^T * A

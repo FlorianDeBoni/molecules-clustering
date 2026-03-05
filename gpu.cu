@@ -113,16 +113,24 @@ void compute_eigenvalues_symmetric_3x3(float m00, float m01, float m02,
 // Launch configuration:
 //   grid  : (N_references_subset)   — one block per reference frame
 //   block : (BLOCK_SIZE)            — e.g. 256 threads, 1-D
-//   smem  : 3 * N_atoms * sizeof(__half)
+//   smem  : rmsd_smem_bytes(N_atoms)
+//           = 3*N_atoms*sizeof(__half)   — centered reference coords
+//           + 3*sizeof(float)            — reference centroid (float[3])
 //
 // Each block:
-//   1. Cooperatively loads its reference frame from global float* into
-//      shared __half[], halving the shared-memory footprint (~27 kB for
-//      a typical molecule that would be ~55 kB in float32).
-//   2. Each thread loops over target frames (grid-stride) and computes
-//      the Kabsch RMSD using the cached reference from smem.
+//   1. Thread 0 reads its reference frame from global memory to compute
+//      the centroid (scalar loop, one thread only — no redundancy).
+//      Centroid is stored in the float[3] tail of smem.
+//   2. All threads cooperatively load (raw - centroid) into the __half
+//      portion of smem in one coalesced pass — ~27 kB total.
+//   3. Each thread handles one or more target frames (grid-stride):
+//        Pass A — target centroid (one pass over global mem)
+//        Pass B — correlation matrix A + RMSD sum fused (one pass over
+//                 global mem for targets; reference reads smem only)
 //
-// All arithmetic is done in float32; __half is storage only.
+// Target coords are read exactly twice per frame (passes A and B).
+// Reference coords are read from global memory exactly once (step 1+2).
+// All arithmetic is in float32; __half is storage only.
 // =======================================================
 __global__
 void RMSD(const float* __restrict__ references,
@@ -132,69 +140,91 @@ void RMSD(const float* __restrict__ references,
           size_t N_atoms,
           float* rmsd_device)
 {
-    // ── Shared memory: one reference frame stored as __half ───────────────
-    // Layout: [x0..x_{N-1}, y0..y_{N-1}, z0..z_{N-1}]
-    // Size allocated at launch: 3 * N_atoms * sizeof(__half)
-    extern __shared__ __half s_ref[];   // 3 * N_atoms halfs
+    // ── Shared memory layout ──────────────────────────────────────────────
+    // [0 .. 3*N_atoms*sizeof(__half))  : centered reference coords (__half)
+    // [aligned ..+3*sizeof(float))     : reference centroid (float[3])
+    //
+    // Total: ~27 kB for N_atoms~4693 — fits in 48 kB smem limit.
+    extern __shared__ __half s_ref_cen[];   // 3 * N_atoms halfs (centered)
 
-    const int ref_idx  = blockIdx.x;
-    const int tid      = threadIdx.x;
-    const int bdim     = blockDim.x;
+    // Centroid stored in float[3] at the aligned end of the __half array.
+    size_t half_bytes   = 3 * N_atoms * sizeof(__half);
+    size_t offset_bytes = (half_bytes + alignof(float) - 1)
+                          & ~(alignof(float) - 1);
+    float* s_centroid   = reinterpret_cast<float*>(
+                              reinterpret_cast<char*>(s_ref_cen) + offset_bytes);
+
+    const int ref_idx = blockIdx.x;
+    const int tid     = threadIdx.x;
+    const int bdim    = blockDim.x;
 
     if (ref_idx >= (int)N_references_subset) return;
 
-    // ── Step 0a: Cooperatively load reference frame into shared memory ────
-    // All bdim threads collaborate to load 3*N_atoms values.
-    // Each value is read once from global memory (float), converted to
-    // __half, and written to smem — replacing 16 redundant global reads
-    // (one per target thread in the old 16×16 layout).
-    const int total_coords = 3 * (int)N_atoms;
-    for (int i = tid; i < total_coords; i += bdim) {
-        int dim  = i / (int)N_atoms;   // 0=x, 1=y, 2=z
-        int atom = i % (int)N_atoms;
-        float v  = references[dim * N_atoms * N_references_subset
-                              + atom * N_references_subset
-                              + ref_idx];
-        s_ref[i] = __float2half(v);
+    // ── Step 0a: Thread 0 computes reference centroid from global memory ──
+    // Fix Issue 1: only ONE thread does this work (was 256× redundant before).
+    // Reading from global memory here is unavoidable — we need the centroid
+    // before we can store centered coords into smem.
+    if (tid == 0) {
+        float cx = 0.f, cy = 0.f, cz = 0.f;
+        for (size_t a = 0; a < N_atoms; a++) {
+            cx += references[0 * N_atoms * N_references_subset + a * N_references_subset + ref_idx];
+            cy += references[1 * N_atoms * N_references_subset + a * N_references_subset + ref_idx];
+            cz += references[2 * N_atoms * N_references_subset + a * N_references_subset + ref_idx];
+        }
+        s_centroid[0] = cx / (float)N_atoms;
+        s_centroid[1] = cy / (float)N_atoms;
+        s_centroid[2] = cz / (float)N_atoms;
     }
     __syncthreads();
 
-    // ── Step 0b: Compute reference centroid from smem (float accumulation) 
-    // All threads compute the same centroid — cheap, avoids extra smem.
-    float rcx = 0.f, rcy = 0.f, rcz = 0.f;
-    for (int a = 0; a < (int)N_atoms; a++) {
-        rcx += __half2float(s_ref[0 * N_atoms + a]);
-        rcy += __half2float(s_ref[1 * N_atoms + a]);
-        rcz += __half2float(s_ref[2 * N_atoms + a]);
+    // All threads read centroid from smem.
+    const float rcx = s_centroid[0];
+    const float rcy = s_centroid[1];
+    const float rcz = s_centroid[2];
+
+    // ── Step 0b: Cooperatively load centered reference coords into smem ───
+    // Fix Issue 3: use size_t throughout to avoid int overflow.
+    // Fix Issue 2 (partial): store (raw - centroid) so per-target loops
+    // never re-read raw reference coords or repeat the subtraction.
+    const size_t total_coords = 3 * N_atoms;
+    for (size_t i = tid; i < total_coords; i += bdim) {
+        size_t dim  = i / N_atoms;
+        size_t atom = i % N_atoms;
+        float  cval = (dim == 0) ? rcx : (dim == 1) ? rcy : rcz;
+        float  raw  = references[dim * N_atoms * N_references_subset
+                                 + atom * N_references_subset
+                                 + ref_idx];
+        s_ref_cen[i] = __float2half(raw - cval);
     }
-    rcx /= N_atoms;
-    rcy /= N_atoms;
-    rcz /= N_atoms;
+    __syncthreads();
 
     // ── Each thread handles one (or more) target frames ───────────────────
     for (int snap_idx = tid; snap_idx < (int)N_targets_subset; snap_idx += bdim) {
 
-        // ── Step 1: Compute target centroid (global memory, sequential per thread)
+        // ── Pass A: target centroid ───────────────────────────────────────
+        // One unavoidable pass over global memory per target frame.
         float scx = 0.f, scy = 0.f, scz = 0.f;
-        for (int a = 0; a < (int)N_atoms; a++) {
+        for (size_t a = 0; a < N_atoms; a++) {
             scx += targets[0 * N_atoms * N_targets_subset + a * N_targets_subset + snap_idx];
             scy += targets[1 * N_atoms * N_targets_subset + a * N_targets_subset + snap_idx];
             scz += targets[2 * N_atoms * N_targets_subset + a * N_targets_subset + snap_idx];
         }
-        scx /= N_atoms;
-        scy /= N_atoms;
-        scz /= N_atoms;
+        scx /= (float)N_atoms;
+        scy /= (float)N_atoms;
+        scz /= (float)N_atoms;
 
-        // ── Step 2: Build correlation matrix A using centered coords ──────
-        // Reference coords come from __half smem (upcasted to float).
-        // Target coords come from global memory.
+        // ── Pass B (FUSED): correlation matrix A + RMSD sum ───────────────
+        // Fix Issue 2: target coords read exactly once per atom per pass.
+        // Centered reference coords come from smem (no global read, no subtraction).
         float a00=0,a01=0,a02=0,a10=0,a11=0,a12=0,a20=0,a21=0,a22=0;
 
-        for (int a = 0; a < (int)N_atoms; a++) {
-            float rx = __half2float(s_ref[0 * N_atoms + a]) - rcx;
-            float ry = __half2float(s_ref[1 * N_atoms + a]) - rcy;
-            float rz = __half2float(s_ref[2 * N_atoms + a]) - rcz;
+        for (size_t a = 0; a < N_atoms; a++) {
+            // Reference: already centered, from __half smem
+            float rx = __half2float(s_ref_cen[0 * N_atoms + a]);
+            float ry = __half2float(s_ref_cen[1 * N_atoms + a]);
+            float rz = __half2float(s_ref_cen[2 * N_atoms + a]);
 
+            // Target: centered, read once from global memory
             float sx = targets[0 * N_atoms * N_targets_subset + a * N_targets_subset + snap_idx] - scx;
             float sy = targets[1 * N_atoms * N_targets_subset + a * N_targets_subset + snap_idx] - scy;
             float sz = targets[2 * N_atoms * N_targets_subset + a * N_targets_subset + snap_idx] - scz;
@@ -263,12 +293,12 @@ void RMSD(const float* __restrict__ references,
         float R21=u0.z*v0.y+u1.z*v1.y+u2.z*v2.y;
         float R22=u0.z*v0.z+u1.z*v1.z+u2.z*v2.z;
 
-        // ── Step 8: Compute RMSD ──────────────────────────────────────────
+        // ── Step 8: RMSD — second pass over target global mem ────────────
         float sum2 = 0.f;
-        for (int a = 0; a < (int)N_atoms; a++) {
-            float rx = __half2float(s_ref[0 * N_atoms + a]) - rcx;
-            float ry = __half2float(s_ref[1 * N_atoms + a]) - rcy;
-            float rz = __half2float(s_ref[2 * N_atoms + a]) - rcz;
+        for (size_t a = 0; a < N_atoms; a++) {
+            float rx = __half2float(s_ref_cen[0 * N_atoms + a]);
+            float ry = __half2float(s_ref_cen[1 * N_atoms + a]);
+            float rz = __half2float(s_ref_cen[2 * N_atoms + a]);
 
             float sx = targets[0 * N_atoms * N_targets_subset + a * N_targets_subset + snap_idx] - scx;
             float sy = targets[1 * N_atoms * N_targets_subset + a * N_targets_subset + snap_idx] - scy;

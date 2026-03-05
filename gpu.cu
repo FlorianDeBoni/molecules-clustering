@@ -1,7 +1,7 @@
 #include "gpu.cuh"
 #include "utils.cuh"
 #include <cuda_runtime.h>
-#include <cuda_bf16.h>
+#include <cuda_fp16.h>
 #include <math_constants.h>
 
 // =======================================================
@@ -107,23 +107,23 @@ void compute_eigenvalues_symmetric_3x3(float m00, float m01, float m02,
     if (lambda[0] < lambda[1]) { float t=lambda[0];lambda[0]=lambda[1];lambda[1]=t; }
 }
 
-
 // =======================================================
-// RMSD kernel
+// RMSD kernel — shared memory + __half for reference coords
+//
+// Launch configuration:
+//   grid  : (N_references_subset)   — one block per reference frame
+//   block : (BLOCK_SIZE)            — e.g. 256 threads, 1-D
+//   smem  : 3 * N_atoms * sizeof(__half)
+//
+// Each block:
+//   1. Cooperatively loads its reference frame from global float* into
+//      shared __half[], halving the shared-memory footprint (~27 kB for
+//      a typical molecule that would be ~55 kB in float32).
+//   2. Each thread loops over target frames (grid-stride) and computes
+//      the Kabsch RMSD using the cached reference from smem.
+//
+// All arithmetic is done in float32; __half is storage only.
 // =======================================================
-//
-// Data layout: data[dim * N_atoms * N_frames + atom * N_frames + frame]
-//
-// Reference reads: all threads in a block share the same ref_idx
-// → all hit the same address → served by L1 broadcast, already free.
-// Shared memory for the reference cannot improve on this.
-//
-// Target reads: each thread has a unique snap_idx
-// → consecutive threads read consecutive frames → coalesced.
-//
-// Grid:  dim3(ceil(N_targets/256), N_references)
-// Block: dim3(256, 1)
-//
 __global__
 void RMSD(const float* __restrict__ references,
           const float* __restrict__ targets,
@@ -132,99 +132,156 @@ void RMSD(const float* __restrict__ references,
           size_t N_atoms,
           float* rmsd_device)
 {
-    int ref_idx  = blockIdx.y;
-    int snap_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    // ── Shared memory: one reference frame stored as __half ───────────────
+    // Layout: [x0..x_{N-1}, y0..y_{N-1}, z0..z_{N-1}]
+    // Size allocated at launch: 3 * N_atoms * sizeof(__half)
+    extern __shared__ __half s_ref[];   // 3 * N_atoms halfs
 
-    if (snap_idx >= (int)N_targets_subset) return;
+    const int ref_idx  = blockIdx.x;
+    const int tid      = threadIdx.x;
+    const int bdim     = blockDim.x;
 
-#define REF(dim, atom) references[(dim)*N_atoms*N_references_subset + (atom)*N_references_subset + ref_idx]
-#define TGT(dim, atom) targets[(dim)*N_atoms*N_targets_subset + (atom)*N_targets_subset + snap_idx]
+    if (ref_idx >= (int)N_references_subset) return;
 
-    // PASS 1: centroids
-    float rcx=0, rcy=0, rcz=0;
-    float scx=0, scy=0, scz=0;
-    for (int a = 0; a < (int)N_atoms; a++) {
-        rcx += REF(0,a); rcy += REF(1,a); rcz += REF(2,a);
-        scx += TGT(0,a); scy += TGT(1,a); scz += TGT(2,a);
+    // ── Step 0a: Cooperatively load reference frame into shared memory ────
+    // All bdim threads collaborate to load 3*N_atoms values.
+    // Each value is read once from global memory (float), converted to
+    // __half, and written to smem — replacing 16 redundant global reads
+    // (one per target thread in the old 16×16 layout).
+    const int total_coords = 3 * (int)N_atoms;
+    for (int i = tid; i < total_coords; i += bdim) {
+        int dim  = i / (int)N_atoms;   // 0=x, 1=y, 2=z
+        int atom = i % (int)N_atoms;
+        float v  = references[dim * N_atoms * N_references_subset
+                              + atom * N_references_subset
+                              + ref_idx];
+        s_ref[i] = __float2half(v);
     }
-    rcx/=N_atoms; rcy/=N_atoms; rcz/=N_atoms;
-    scx/=N_atoms; scy/=N_atoms; scz/=N_atoms;
+    __syncthreads();
 
-    // PASS 2: correlation matrix A
-    float a00=0,a01=0,a02=0,a10=0,a11=0,a12=0,a20=0,a21=0,a22=0;
+    // ── Step 0b: Compute reference centroid from smem (float accumulation) 
+    // All threads compute the same centroid — cheap, avoids extra smem.
+    float rcx = 0.f, rcy = 0.f, rcz = 0.f;
     for (int a = 0; a < (int)N_atoms; a++) {
-        float rx=REF(0,a)-rcx, ry=REF(1,a)-rcy, rz=REF(2,a)-rcz;
-        float sx=TGT(0,a)-scx, sy=TGT(1,a)-scy, sz=TGT(2,a)-scz;
-        a00+=rx*sx; a01+=rx*sy; a02+=rx*sz;
-        a10+=ry*sx; a11+=ry*sy; a12+=ry*sz;
-        a20+=rz*sx; a21+=rz*sy; a22+=rz*sz;
+        rcx += __half2float(s_ref[0 * N_atoms + a]);
+        rcy += __half2float(s_ref[1 * N_atoms + a]);
+        rcz += __half2float(s_ref[2 * N_atoms + a]);
     }
+    rcx /= N_atoms;
+    rcy /= N_atoms;
+    rcz /= N_atoms;
 
-    // M = A^T * A
-    float m00=a00*a00+a10*a10+a20*a20;
-    float m01=a00*a01+a10*a11+a20*a21;
-    float m02=a00*a02+a10*a12+a20*a22;
-    float m11=a01*a01+a11*a11+a21*a21;
-    float m12=a01*a02+a11*a12+a21*a22;
-    float m22=a02*a02+a12*a12+a22*a22;
+    // ── Each thread handles one (or more) target frames ───────────────────
+    for (int snap_idx = tid; snap_idx < (int)N_targets_subset; snap_idx += bdim) {
 
-    // Eigenvalues
-    float lambda[3];
-    compute_eigenvalues_symmetric_3x3(m00,m01,m02,m11,m12,m22,lambda);
+        // ── Step 1: Compute target centroid (global memory, sequential per thread)
+        float scx = 0.f, scy = 0.f, scz = 0.f;
+        for (int a = 0; a < (int)N_atoms; a++) {
+            scx += targets[0 * N_atoms * N_targets_subset + a * N_targets_subset + snap_idx];
+            scy += targets[1 * N_atoms * N_targets_subset + a * N_targets_subset + snap_idx];
+            scz += targets[2 * N_atoms * N_targets_subset + a * N_targets_subset + snap_idx];
+        }
+        scx /= N_atoms;
+        scy /= N_atoms;
+        scz /= N_atoms;
 
-    // Eigenvectors
-    float3 v0,v1,v2;
-    compute_eigenvector(m00,m01,m02,m11,m12,m22,lambda[0],v0.x,v0.y,v0.z);
-    compute_eigenvector(m00,m01,m02,m11,m12,m22,lambda[1],v1.x,v1.y,v1.z);
+        // ── Step 2: Build correlation matrix A using centered coords ──────
+        // Reference coords come from __half smem (upcasted to float).
+        // Target coords come from global memory.
+        float a00=0,a01=0,a02=0,a10=0,a11=0,a12=0,a20=0,a21=0,a22=0;
 
-    // Orthonormalize V
-    float d=v0.x*v1.x+v0.y*v1.y+v0.z*v1.z;
-    v1.x-=d*v0.x; v1.y-=d*v0.y; v1.z-=d*v0.z;
-    float n=sqrtf(v1.x*v1.x+v1.y*v1.y+v1.z*v1.z);
-    if(n>1e-8f){v1.x/=n;v1.y/=n;v1.z/=n;}
-    v2.x=v0.y*v1.z-v0.z*v1.y;
-    v2.y=v0.z*v1.x-v0.x*v1.z;
-    v2.z=v0.x*v1.y-v0.y*v1.x;
+        for (int a = 0; a < (int)N_atoms; a++) {
+            float rx = __half2float(s_ref[0 * N_atoms + a]) - rcx;
+            float ry = __half2float(s_ref[1 * N_atoms + a]) - rcy;
+            float rz = __half2float(s_ref[2 * N_atoms + a]) - rcz;
 
-    // U = A*V
-    float av0x=a00*v0.x+a01*v0.y+a02*v0.z;
-    float av0y=a10*v0.x+a11*v0.y+a12*v0.z;
-    float av0z=a20*v0.x+a21*v0.y+a22*v0.z;
-    float av1x=a00*v1.x+a01*v1.y+a02*v1.z;
-    float av1y=a10*v1.x+a11*v1.y+a12*v1.z;
-    float av1z=a20*v1.x+a21*v1.y+a22*v1.z;
-    float s0=sqrtf(fmaxf(lambda[0],1e-8f));
-    float s1=sqrtf(fmaxf(lambda[1],1e-8f));
-    float3 u0={av0x/s0,av0y/s0,av0z/s0};
-    float3 u1={av1x/s1,av1y/s1,av1z/s1};
-    float3 u2={u0.y*u1.z-u0.z*u1.y,
-               u0.z*u1.x-u0.x*u1.z,
-               u0.x*u1.y-u0.y*u1.x};
+            float sx = targets[0 * N_atoms * N_targets_subset + a * N_targets_subset + snap_idx] - scx;
+            float sy = targets[1 * N_atoms * N_targets_subset + a * N_targets_subset + snap_idx] - scy;
+            float sz = targets[2 * N_atoms * N_targets_subset + a * N_targets_subset + snap_idx] - scz;
 
-    // R = U*V^T
-    float R00=u0.x*v0.x+u1.x*v1.x+u2.x*v2.x;
-    float R01=u0.x*v0.y+u1.x*v1.y+u2.x*v2.y;
-    float R02=u0.x*v0.z+u1.x*v1.z+u2.x*v2.z;
-    float R10=u0.y*v0.x+u1.y*v1.x+u2.y*v2.x;
-    float R11=u0.y*v0.y+u1.y*v1.y+u2.y*v2.y;
-    float R12=u0.y*v0.z+u1.y*v1.z+u2.y*v2.z;
-    float R20=u0.z*v0.x+u1.z*v1.x+u2.z*v2.x;
-    float R21=u0.z*v0.y+u1.z*v1.y+u2.z*v2.y;
-    float R22=u0.z*v0.z+u1.z*v1.z+u2.z*v2.z;
+            a00+=rx*sx; a01+=rx*sy; a02+=rx*sz;
+            a10+=ry*sx; a11+=ry*sy; a12+=ry*sz;
+            a20+=rz*sx; a21+=rz*sy; a22+=rz*sz;
+        }
 
-    // PASS 3: RMSD
-    float sum2=0;
-    for (int a = 0; a < (int)N_atoms; a++) {
-        float rx=REF(0,a)-rcx, ry=REF(1,a)-rcy, rz=REF(2,a)-rcz;
-        float sx=TGT(0,a)-scx, sy=TGT(1,a)-scy, sz=TGT(2,a)-scz;
-        float x=R00*sx+R01*sy+R02*sz;
-        float y=R10*sx+R11*sy+R12*sz;
-        float z=R20*sx+R21*sy+R22*sz;
-        float dx=rx-x, dy=ry-y, dz=rz-z;
-        sum2+=dx*dx+dy*dy+dz*dz;
+        // Compute M = A^T * A
+        float m00=a00*a00+a10*a10+a20*a20;
+        float m01=a00*a01+a10*a11+a20*a21;
+        float m02=a00*a02+a10*a12+a20*a22;
+        float m11=a01*a01+a11*a11+a21*a21;
+        float m12=a01*a02+a11*a12+a21*a22;
+        float m22=a02*a02+a12*a12+a22*a22;
+
+        // ── Step 3: Eigenvalues ───────────────────────────────────────────
+        float lambda[3];
+        compute_eigenvalues_symmetric_3x3(m00,m01,m02,m11,m12,m22,lambda);
+
+        // ── Step 4: Eigenvectors ──────────────────────────────────────────
+        float3 v0,v1,v2;
+        compute_eigenvector(m00,m01,m02,m11,m12,m22,lambda[0],v0.x,v0.y,v0.z);
+        compute_eigenvector(m00,m01,m02,m11,m12,m22,lambda[1],v1.x,v1.y,v1.z);
+
+        // ── Step 5: Orthonormalize V ──────────────────────────────────────
+        float d=v0.x*v1.x+v0.y*v1.y+v0.z*v1.z;
+        v1.x-=d*v0.x; v1.y-=d*v0.y; v1.z-=d*v0.z;
+
+        float n=sqrtf(v1.x*v1.x+v1.y*v1.y+v1.z*v1.z);
+        if(n>1e-8f){v1.x/=n;v1.y/=n;v1.z/=n;}
+
+        v2.x=v0.y*v1.z-v0.z*v1.y;
+        v2.y=v0.z*v1.x-v0.x*v1.z;
+        v2.z=v0.x*v1.y-v0.y*v1.x;
+
+        // ── Step 6: Compute U = A*V ───────────────────────────────────────
+        float av0x=a00*v0.x+a01*v0.y+a02*v0.z;
+        float av0y=a10*v0.x+a11*v0.y+a12*v0.z;
+        float av0z=a20*v0.x+a21*v0.y+a22*v0.z;
+
+        float av1x=a00*v1.x+a01*v1.y+a02*v1.z;
+        float av1y=a10*v1.x+a11*v1.y+a12*v1.z;
+        float av1z=a20*v1.x+a21*v1.y+a22*v1.z;
+
+        float s0=sqrtf(fmaxf(lambda[0],1e-8f));
+        float s1=sqrtf(fmaxf(lambda[1],1e-8f));
+
+        float3 u0={av0x/s0,av0y/s0,av0z/s0};
+        float3 u1={av1x/s1,av1y/s1,av1z/s1};
+        float3 u2={u0.y*u1.z-u0.z*u1.y,
+                   u0.z*u1.x-u0.x*u1.z,
+                   u0.x*u1.y-u0.y*u1.x};
+
+        // ── Step 7: Compute R = U*V^T ─────────────────────────────────────
+        float R00=u0.x*v0.x+u1.x*v1.x+u2.x*v2.x;
+        float R01=u0.x*v0.y+u1.x*v1.y+u2.x*v2.y;
+        float R02=u0.x*v0.z+u1.x*v1.z+u2.x*v2.z;
+
+        float R10=u0.y*v0.x+u1.y*v1.x+u2.y*v2.x;
+        float R11=u0.y*v0.y+u1.y*v1.y+u2.y*v2.y;
+        float R12=u0.y*v0.z+u1.y*v1.z+u2.y*v2.z;
+
+        float R20=u0.z*v0.x+u1.z*v1.x+u2.z*v2.x;
+        float R21=u0.z*v0.y+u1.z*v1.y+u2.z*v2.y;
+        float R22=u0.z*v0.z+u1.z*v1.z+u2.z*v2.z;
+
+        // ── Step 8: Compute RMSD ──────────────────────────────────────────
+        float sum2 = 0.f;
+        for (int a = 0; a < (int)N_atoms; a++) {
+            float rx = __half2float(s_ref[0 * N_atoms + a]) - rcx;
+            float ry = __half2float(s_ref[1 * N_atoms + a]) - rcy;
+            float rz = __half2float(s_ref[2 * N_atoms + a]) - rcz;
+
+            float sx = targets[0 * N_atoms * N_targets_subset + a * N_targets_subset + snap_idx] - scx;
+            float sy = targets[1 * N_atoms * N_targets_subset + a * N_targets_subset + snap_idx] - scy;
+            float sz = targets[2 * N_atoms * N_targets_subset + a * N_targets_subset + snap_idx] - scz;
+
+            float x = R00*sx + R01*sy + R02*sz;
+            float y = R10*sx + R11*sy + R12*sz;
+            float z = R20*sx + R21*sy + R22*sz;
+
+            float dx=rx-x, dy=ry-y, dz=rz-z;
+            sum2 += dx*dx + dy*dy + dz*dz;
+        }
+
+        rmsd_device[(size_t)ref_idx * N_targets_subset + snap_idx] = sqrtf(sum2 / N_atoms);
     }
-#undef REF
-#undef TGT
-
-    rmsd_device[(size_t)ref_idx * N_targets_subset + snap_idx] = sqrtf(sum2/N_atoms);
 }

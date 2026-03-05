@@ -103,8 +103,9 @@ int main(int argc, char** args) {
     CHECK_SUCCESS(cudaMalloc(&d_targets,    NB_FRAMES_PER_CHUNK * N_atoms * 3 * sizeof(float)), "Allocating memory for targets");
     CHECK_SUCCESS(cudaMalloc(&d_rmsd,       NB_FRAMES_PER_CHUNK * NB_FRAMES_PER_CHUNK * sizeof(float)), "Allocating rmsd vector on GPU");
 
-    // smem: bfloat16 coords for one reference  →  N_atoms * 3 * 2 bytes
-    const size_t smem_bytes = N_atoms * 3 * sizeof(__nv_bfloat16);
+    // smem: float32 tile of reference coords  →  TILE * 3 * 4 bytes = 12 kB
+    const size_t TILE = 1024;
+    const size_t smem_bytes = TILE * 3 * sizeof(float);
     dim3 threads(256, 1);
 
 

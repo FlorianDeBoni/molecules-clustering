@@ -108,8 +108,203 @@ void compute_eigenvalues_symmetric_3x3(float m00, float m01, float m02,
 }
 
 // =======================================================
-// RMSD kernel  –  one reference per block, cached in shared memory
+// RMSD kernel  –  reference tiled through shared memory as float32
 // =======================================================
+//
+// Grid / block layout:
+//   blockDim  = (256, 1)
+//   gridDim.x = ceil(N_targets_subset / 256)
+//   gridDim.y = N_references_subset
+//
+// Problem with loading the whole reference at once:
+//   N_atoms * 3 * 4 bytes = ~55 kB for 4700 atoms → exceeds 48 kB shared mem
+//
+// Solution: tile atoms in chunks of TILE atoms at a time.
+//   Each tile fits in shared memory as float32 (no bfloat16 conversion needed).
+//   All 256 threads load the tile cooperatively, then each thread accumulates
+//   its centroid / correlation / RMSD sums for those atoms before moving on.
+//   The reference is read from global memory exactly once per atom total,
+//   and reused across all 256 target threads from shared memory.
+//
+// Shared memory: float[TILE * 3]  (x-block, y-block, z-block for TILE atoms)
+//   TILE = 1024 → 1024 * 3 * 4 = 12 kB  (well within 48 kB)
+//
+// Two-pass algorithm:
+//   Pass 1: accumulate centroids (rcx/rcy/rcz) tiling through all atoms
+//   Pass 2: accumulate correlation matrix A and RMSD sum tiling through atoms
+//   (two passes needed because centroid must be complete before correlation)
+//
+#define TILE 1024
+
+__global__
+void RMSD(const float* __restrict__ references,
+          const float* __restrict__ targets,
+          size_t N_references_subset,
+          size_t N_targets_subset,
+          size_t N_atoms,
+          float* rmsd_device)
+{
+    int ref_idx  = blockIdx.y;
+    int snap_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    bool active  = snap_idx < (int)N_targets_subset;
+
+    extern __shared__ float sref[];  // [TILE * 3]  as float32
+
+    // ── PASS 1: centroids ────────────────────────────────────────────────────
+    float rcx=0, rcy=0, rcz=0;
+    float scx=0, scy=0, scz=0;
+
+    for (int tile_start = 0; tile_start < (int)N_atoms; tile_start += TILE) {
+        int tile_len = min(TILE, (int)N_atoms - tile_start);
+
+        // Load this tile of the reference cooperatively (float32, coalesced)
+        for (int i = threadIdx.x; i < tile_len * 3; i += blockDim.x) {
+            int dim  = i / tile_len;
+            int atom = tile_start + i % tile_len;
+            sref[i]  = references[dim * N_atoms * N_references_subset
+                                   + atom * N_references_subset
+                                   + ref_idx];
+        }
+        __syncthreads();
+
+        if (active) {
+            for (int i = 0; i < tile_len; i++) {
+                rcx += sref[0 * tile_len + i];
+                rcy += sref[1 * tile_len + i];
+                rcz += sref[2 * tile_len + i];
+                int a = tile_start + i;
+                scx += targets[0*N_atoms*N_targets_subset + a*N_targets_subset + snap_idx];
+                scy += targets[1*N_atoms*N_targets_subset + a*N_targets_subset + snap_idx];
+                scz += targets[2*N_atoms*N_targets_subset + a*N_targets_subset + snap_idx];
+            }
+        }
+        __syncthreads();
+    }
+
+    rcx/=N_atoms; rcy/=N_atoms; rcz/=N_atoms;
+    scx/=N_atoms; scy/=N_atoms; scz/=N_atoms;
+
+    // ── PASS 2: correlation matrix A and RMSD sum ────────────────────────────
+    float a00=0,a01=0,a02=0,a10=0,a11=0,a12=0,a20=0,a21=0,a22=0;
+
+    for (int tile_start = 0; tile_start < (int)N_atoms; tile_start += TILE) {
+        int tile_len = min(TILE, (int)N_atoms - tile_start);
+
+        // Reload same tile (reference coords needed again for correlation)
+        for (int i = threadIdx.x; i < tile_len * 3; i += blockDim.x) {
+            int dim  = i / tile_len;
+            int atom = tile_start + i % tile_len;
+            sref[i]  = references[dim * N_atoms * N_references_subset
+                                   + atom * N_references_subset
+                                   + ref_idx];
+        }
+        __syncthreads();
+
+        if (active) {
+            for (int i = 0; i < tile_len; i++) {
+                float rx = sref[0*tile_len+i] - rcx;
+                float ry = sref[1*tile_len+i] - rcy;
+                float rz = sref[2*tile_len+i] - rcz;
+                int a = tile_start + i;
+                float sx = targets[0*N_atoms*N_targets_subset+a*N_targets_subset+snap_idx] - scx;
+                float sy = targets[1*N_atoms*N_targets_subset+a*N_targets_subset+snap_idx] - scy;
+                float sz = targets[2*N_atoms*N_targets_subset+a*N_targets_subset+snap_idx] - scz;
+                a00+=rx*sx; a01+=rx*sy; a02+=rx*sz;
+                a10+=ry*sx; a11+=ry*sy; a12+=ry*sz;
+                a20+=rz*sx; a21+=rz*sy; a22+=rz*sz;
+            }
+        }
+        __syncthreads();
+    }
+
+    if (!active) return;
+
+    // M = A^T * A
+    float m00=a00*a00+a10*a10+a20*a20;
+    float m01=a00*a01+a10*a11+a20*a21;
+    float m02=a00*a02+a10*a12+a20*a22;
+    float m11=a01*a01+a11*a11+a21*a21;
+    float m12=a01*a02+a11*a12+a21*a22;
+    float m22=a02*a02+a12*a12+a22*a22;
+
+    // STEP 2: Eigenvalues
+    float lambda[3];
+    compute_eigenvalues_symmetric_3x3(m00,m01,m02,m11,m12,m22,lambda);
+
+    // STEP 3: Eigenvectors
+    float3 v0,v1,v2;
+    compute_eigenvector(m00,m01,m02,m11,m12,m22,lambda[0],v0.x,v0.y,v0.z);
+    compute_eigenvector(m00,m01,m02,m11,m12,m22,lambda[1],v1.x,v1.y,v1.z);
+
+    // STEP 4: Orthonormalize V
+    float d=v0.x*v1.x+v0.y*v1.y+v0.z*v1.z;
+    v1.x-=d*v0.x; v1.y-=d*v0.y; v1.z-=d*v0.z;
+    float n=sqrtf(v1.x*v1.x+v1.y*v1.y+v1.z*v1.z);
+    if(n>1e-8f){v1.x/=n;v1.y/=n;v1.z/=n;}
+    v2.x=v0.y*v1.z-v0.z*v1.y;
+    v2.y=v0.z*v1.x-v0.x*v1.z;
+    v2.z=v0.x*v1.y-v0.y*v1.x;
+
+    // STEP 5: U = A*V
+    float av0x=a00*v0.x+a01*v0.y+a02*v0.z;
+    float av0y=a10*v0.x+a11*v0.y+a12*v0.z;
+    float av0z=a20*v0.x+a21*v0.y+a22*v0.z;
+    float av1x=a00*v1.x+a01*v1.y+a02*v1.z;
+    float av1y=a10*v1.x+a11*v1.y+a12*v1.z;
+    float av1z=a20*v1.x+a21*v1.y+a22*v1.z;
+    float s0=sqrtf(fmaxf(lambda[0],1e-8f));
+    float s1=sqrtf(fmaxf(lambda[1],1e-8f));
+    float3 u0={av0x/s0,av0y/s0,av0z/s0};
+    float3 u1={av1x/s1,av1y/s1,av1z/s1};
+    float3 u2={u0.y*u1.z-u0.z*u1.y,
+               u0.z*u1.x-u0.x*u1.z,
+               u0.x*u1.y-u0.y*u1.x};
+
+    // STEP 6: R = U*V^T
+    float R00=u0.x*v0.x+u1.x*v1.x+u2.x*v2.x;
+    float R01=u0.x*v0.y+u1.x*v1.y+u2.x*v2.y;
+    float R02=u0.x*v0.z+u1.x*v1.z+u2.x*v2.z;
+    float R10=u0.y*v0.x+u1.y*v1.x+u2.y*v2.x;
+    float R11=u0.y*v0.y+u1.y*v1.y+u2.y*v2.y;
+    float R12=u0.y*v0.z+u1.y*v1.z+u2.y*v2.z;
+    float R20=u0.z*v0.x+u1.z*v1.x+u2.z*v2.x;
+    float R21=u0.z*v0.y+u1.z*v1.y+u2.z*v2.y;
+    float R22=u0.z*v0.z+u1.z*v1.z+u2.z*v2.z;
+
+    // STEP 7: RMSD  (third and final pass through reference — also tiled)
+    float sum2=0;
+    for (int tile_start = 0; tile_start < (int)N_atoms; tile_start += TILE) {
+        int tile_len = min(TILE, (int)N_atoms - tile_start);
+
+        for (int i = threadIdx.x; i < tile_len * 3; i += blockDim.x) {
+            int dim  = i / tile_len;
+            int atom = tile_start + i % tile_len;
+            sref[i]  = references[dim * N_atoms * N_references_subset
+                                   + atom * N_references_subset
+                                   + ref_idx];
+        }
+        __syncthreads();
+
+        for (int i = 0; i < tile_len; i++) {
+            float rx = sref[0*tile_len+i] - rcx;
+            float ry = sref[1*tile_len+i] - rcy;
+            float rz = sref[2*tile_len+i] - rcz;
+            int a = tile_start + i;
+            float sx = targets[0*N_atoms*N_targets_subset+a*N_targets_subset+snap_idx] - scx;
+            float sy = targets[1*N_atoms*N_targets_subset+a*N_targets_subset+snap_idx] - scy;
+            float sz = targets[2*N_atoms*N_targets_subset+a*N_targets_subset+snap_idx] - scz;
+            float x=R00*sx+R01*sy+R02*sz;
+            float y=R10*sx+R11*sy+R12*sz;
+            float z=R20*sx+R21*sy+R22*sz;
+            float dx=rx-x, dy=ry-y, dz=rz-z;
+            sum2+=dx*dx+dy*dy+dz*dz;
+        }
+        __syncthreads();
+    }
+
+    rmsd_device[(size_t)ref_idx * N_targets_subset + snap_idx] = sqrtf(sum2/N_atoms);
+}
+#undef TILE
 //
 // Grid / block layout:
 //   blockDim  = (256, 1)

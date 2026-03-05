@@ -102,12 +102,8 @@ int main(int argc, char** args) {
     CHECK_SUCCESS(cudaMalloc(&d_targets,    NB_FRAMES_PER_CHUNK * N_atoms * 3 * sizeof(float)), "Allocating memory for targets");
     CHECK_SUCCESS(cudaMalloc(&d_rmsd,       NB_FRAMES_PER_CHUNK * NB_FRAMES_PER_CHUNK * sizeof(float)), "Allocating rmsd vector on GPU");
 
-    // 1-D block: 256 threads per block, one block per reference frame.
-    // Dynamic shared memory holds one reference frame as __half:
-    //   3 * N_atoms * sizeof(__half)  ≈ 27 kB  (vs ~55 kB in float32).
-    const int BLOCK_SIZE = 256;
+    dim3 threads(16, 16);
     size_t size_rmsd = NB_FRAMES_PER_CHUNK * NB_FRAMES_PER_CHUNK * sizeof(float);
-    size_t smem_bytes = rmsd_smem_bytes(N_atoms);  // 3 * N_atoms * sizeof(__half)
 
     // ── Accumulators for aggregate throughput ─────────────────────────────────
     double total_extract_s  = 0.0;
@@ -155,13 +151,13 @@ int main(int argc, char** args) {
                                      cudaMemcpyHostToDevice), "Copying Targets on GPU");
 
             // ── RMSD kernel ───────────────────────────────────────────────────
-            // Grid: one block per reference frame (1-D).
-            // Each block loads its reference into shared __half memory once,
-            // then all threads loop over target frames (grid-stride).
+            dim3 blocks((nb_tgt + threads.x - 1) / threads.x,
+                        (nb_ref + threads.y - 1) / threads.y);
+
             CHECK_SUCCESS(cudaDeviceSynchronize(), "Ready to launch RMSD Kernel");
 
             chrono_type t_kernel = chrono_time::now();
-            RMSD<<<nb_ref, BLOCK_SIZE, smem_bytes>>>(
+            RMSD<<<blocks, threads>>>(
                 d_references, d_targets,
                 nb_ref, nb_tgt, N_atoms,
                 d_rmsd

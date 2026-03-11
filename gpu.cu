@@ -91,7 +91,7 @@ void computeCentroidsG(const float* coords,
 }
 
 __global__
-void RMSD(
+void RMSD_shared_dynamic(
         const float* refs,
         const float* tgts,
         size_t N_atoms,
@@ -107,44 +107,67 @@ void RMSD(
         const float* G_tgt,
         float* rmsd)
 {
-    int r=blockIdx.y*blockDim.y+threadIdx.y;
-    int t=blockIdx.x*blockDim.x+threadIdx.x;
+    extern __shared__ float sh_mem[]; 
+    // We'll split sh_mem dynamically into refs and tgts arrays
 
+    int r = blockIdx.y*blockDim.y + threadIdx.y;
+    int t = blockIdx.x*blockDim.x + threadIdx.x;
     if(r>=N_ref || t>=N_tgt) return;
 
-    float rcx=cx_ref[r];
-    float rcy=cy_ref[r];
-    float rcz=cz_ref[r];
+    float rcx=cx_ref[r], rcy=cy_ref[r], rcz=cz_ref[r];
+    float scx=cx_tgt[t], scy=cy_tgt[t], scz=cz_tgt[t];
 
-    float scx=cx_tgt[t];
-    float scy=cy_tgt[t];
-    float scz=cz_tgt[t];
+    float a00=0,a01=0,a02=0;
+    float a10=0,a11=0,a12=0;
+    float a20=0,a21=0,a22=0;
 
-    float a00=0,a01=0,a02=0,a10=0,a11=0,a12=0,a20=0,a21=0,a22=0;
+    // Compute TILE dynamically based on N_atoms and block size
+    int block_threads = blockDim.x * blockDim.y;
+    int max_tile = N_atoms; // fallback
+    // you can optionally set max_tile to some fraction of N_atoms if shared memory is limited
 
-    const int TILE=256;
+    for(int start=0; start<N_atoms; start+=max_tile)
+    {
+        int tile_atoms = min(max_tile, (int)(N_atoms - start));
 
-    for(int start=0;start<N_atoms;start+=TILE){
+        float* s_ref  = sh_mem;                               // size: 3*tile_atoms*block_threads
+        float* s_tgt  = sh_mem + 3*tile_atoms*block_threads;  // offset
 
-        int end=min(start+TILE,(int)N_atoms);
+        // load coords into shared memory
+        if(threadIdx.x < tile_atoms)
+        {
+            size_t a = start + threadIdx.x;
+            size_t br = a*N_ref + r;
+            size_t bt = a*N_tgt + t;
 
-        for(int a=start;a<end;a++){
+            s_ref[threadIdx.x + 0*tile_atoms*block_threads] = refs[0*N_atoms*N_ref + br]-rcx;
+            s_ref[threadIdx.x + 1*tile_atoms*block_threads] = refs[1*N_atoms*N_ref + br]-rcy;
+            s_ref[threadIdx.x + 2*tile_atoms*block_threads] = refs[2*N_atoms*N_ref + br]-rcz;
 
-            size_t br=a*N_ref+r;
-            size_t bt=a*N_tgt+t;
+            s_tgt[threadIdx.x + 0*tile_atoms*block_threads] = tgts[0*N_atoms*N_tgt + bt]-scx;
+            s_tgt[threadIdx.x + 1*tile_atoms*block_threads] = tgts[1*N_atoms*N_tgt + bt]-scy;
+            s_tgt[threadIdx.x + 2*tile_atoms*block_threads] = tgts[2*N_atoms*N_tgt + bt]-scz;
+        }
 
-            float rx=refs[0*N_atoms*N_ref+br]-rcx;
-            float ry=refs[1*N_atoms*N_ref+br]-rcy;
-            float rz=refs[2*N_atoms*N_ref+br]-rcz;
+        __syncthreads();
 
-            float sx=tgts[0*N_atoms*N_tgt+bt]-scx;
-            float sy=tgts[1*N_atoms*N_tgt+bt]-scy;
-            float sz=tgts[2*N_atoms*N_tgt+bt]-scz;
+        // compute covariance for this tile
+        for(int k=0;k<tile_atoms;k++)
+        {
+            float rx = s_ref[k + 0*tile_atoms*block_threads];
+            float ry = s_ref[k + 1*tile_atoms*block_threads];
+            float rz = s_ref[k + 2*tile_atoms*block_threads];
+
+            float sx = s_tgt[k + 0*tile_atoms*block_threads];
+            float sy = s_tgt[k + 1*tile_atoms*block_threads];
+            float sz = s_tgt[k + 2*tile_atoms*block_threads];
 
             a00+=rx*sx; a01+=rx*sy; a02+=rx*sz;
             a10+=ry*sx; a11+=ry*sy; a12+=ry*sz;
             a20+=rz*sx; a21+=rz*sy; a22+=rz*sz;
         }
+
+        __syncthreads();
     }
 
     float m00=a00*a00+a10*a10+a20*a20;

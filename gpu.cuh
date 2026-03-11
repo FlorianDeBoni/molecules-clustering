@@ -31,19 +31,19 @@ void computeCentroidsG(const float* __restrict__ coords,
                        float* __restrict__ G);
 
 __global__
-void RMSD(const float* __restrict__ refs,
-                      const float* __restrict__ tgts,
-                      size_t N_atoms,
-                      size_t N_ref,
-                      size_t N_tgt,
-                      const float* __restrict__ cx_ref,
-                      const float* __restrict__ cy_ref,
-                      const float* __restrict__ cz_ref,
-                      const float* __restrict__ G_ref,
-                      const float* __restrict__ cx_tgt,
-                      const float* __restrict__ cy_tgt,
-                      const float* __restrict__ cz_tgt,
-                      const float* __restrict__ G_tgt,
-                      float* __restrict__ rmsd);
+void RMSD(  const float* __restrict__ refs,
+            const float* __restrict__ tgts,
+            size_t N_atoms,
+            size_t N_ref,
+            size_t N_tgt,
+            const float* __restrict__ cx_ref,
+            const float* __restrict__ cy_ref,
+            const float* __restrict__ cz_ref,
+            const float* __restrict__ G_ref,
+            const float* __restrict__ cx_tgt,
+            const float* __restrict__ cy_tgt,
+            const float* __restrict__ cz_tgt,
+            const float* __restrict__ G_tgt,
+            float* __restrict__ rmsd);
 
 #endif // GPU_CUH

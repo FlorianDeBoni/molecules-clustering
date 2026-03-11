@@ -175,7 +175,7 @@ int main(int argc, char** args) {
         cudaEventElapsedTime(&ms,start_evt,stop_evt);
         centroid_time_ms += ms;
 
-        for(size_t col=row; col<NB_ROW_ITERATIONS; col++) {
+        for(size_t col = row; col < NB_ROW_ITERATIONS; col++) {
 
             size_t start_col = col * NB_FRAMES_PER_CHUNK;
             size_t stop_col  = std::min(start_col + NB_FRAMES_PER_CHUNK, N_frames);
@@ -184,56 +184,67 @@ int main(int argc, char** args) {
 
             total_molecules_processed += nb_tgt;
 
+            // Extract target chunk
             file.extractSnapshotsFastInPlace(
                 start_col, stop_col, all_data, targets_coordinates);
 
             cudaMemcpy(d_targets,
-                       targets_coordinates.data(),
-                       targets_coordinates.size()*sizeof(float),
-                       cudaMemcpyHostToDevice);
+                    targets_coordinates.data(),
+                    targets_coordinates.size()*sizeof(float),
+                    cudaMemcpyHostToDevice);
 
+            // Centroids for targets
+            int threads1D = 128;
             int blocks_tgt = (nb_tgt + threads1D - 1) / threads1D;
 
             cudaEventRecord(start_evt);
-
-            computeCentroidsG<<<blocks_tgt,threads1D>>>(
-                d_targets,N_atoms,nb_tgt,
-                d_cx_tgt,d_cy_tgt,d_cz_tgt,d_G_tgt);
-
+            computeCentroidsG<<<blocks_tgt, threads1D>>>(
+                d_targets, N_atoms, nb_tgt,
+                d_cx_tgt, d_cy_tgt, d_cz_tgt, d_G_tgt);
             cudaEventRecord(stop_evt);
             cudaEventSynchronize(stop_evt);
 
-            cudaEventElapsedTime(&ms,start_evt,stop_evt);
+            float ms;
+            cudaEventElapsedTime(&ms, start_evt, stop_evt);
             centroid_time_ms += ms;
 
+            // ---------------------------
+            // Shared memory RMSD launch
+            // ---------------------------
+
+            dim3 threads(32, 8); // can tune
             dim3 blocks(
                 (nb_tgt + threads.x - 1) / threads.x,
-                (nb_ref + threads.y - 1) / threads.y);
+                (nb_ref + threads.y - 1) / threads.y
+            );
+
+            int TILE = std::min(128, (int)N_atoms); // tile size for atoms
+            size_t threads_per_block = threads.x * threads.y;
+            size_t smem_bytes = 2 * 3 * TILE * threads_per_block * sizeof(float);
 
             cudaEventRecord(start_evt);
-
-            RMSD<<<blocks,threads>>>(
-                d_references,d_targets,
-                N_atoms,nb_ref,nb_tgt,
-                d_cx_ref,d_cy_ref,d_cz_ref,d_G_ref,
-                d_cx_tgt,d_cy_tgt,d_cz_tgt,d_G_tgt,
-                d_rmsd);
-
+            RMSD<<<blocks, threads, smem_bytes>>>(
+                d_references, d_targets,
+                N_atoms, nb_ref, nb_tgt,
+                d_cx_ref, d_cy_ref, d_cz_ref, d_G_ref,
+                d_cx_tgt, d_cy_tgt, d_cz_tgt, d_G_tgt,
+                d_rmsd
+            );
             cudaEventRecord(stop_evt);
             cudaEventSynchronize(stop_evt);
 
-            cudaEventElapsedTime(&ms,start_evt,stop_evt);
+            cudaEventElapsedTime(&ms, start_evt, stop_evt);
             rmsd_time_ms += ms;
 
             total_rmsd_pairs += nb_ref * nb_tgt;
 
+            // Copy back to host
             cudaMemcpy(rmsdHostChunk,
-                       d_rmsd,
-                       nb_ref*nb_tgt*sizeof(float),
-                       cudaMemcpyDeviceToHost);
+                    d_rmsd,
+                    nb_ref*nb_tgt*sizeof(float),
+                    cudaMemcpyDeviceToHost);
 
-            // scatter into full matrix
-
+            // Scatter chunk into full matrix
             for(size_t i=0;i<nb_ref;i++)
                 for(size_t j=0;j<nb_tgt;j++)
                 {

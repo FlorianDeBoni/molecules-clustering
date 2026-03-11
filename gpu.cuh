@@ -21,6 +21,20 @@ inline void freeOnGPU(float* ptr) {
     if(ptr) cudaFree(ptr);
 }
 
+
+inline __device__ float getRMSD_GPU(int i, int j, const float* rmsdPacked, int N_snapshots) {
+    if (i == j) return 0.0f;
+    if (i > j) {
+        int tmp = i;
+        i = j;
+        j = tmp;
+    }
+    size_t idx = (size_t)i * N_snapshots
+           - ((size_t)i * ((size_t)i + 1)) / 2
+           + (j - i - 1);
+    return rmsdPacked[idx];
+}
+
 __global__
 void RMSD(
     const float* __restrict__ references,
@@ -30,5 +44,35 @@ void RMSD(
     size_t N_atoms,
     float* rmsd_device
 );
+
+__global__ 
+void runKMedoidsGPU(
+    int N_frames,
+    int K,
+    const float* __restrict__ rmsd,
+    int* centroidsGPU, 
+    int* clustersGPU,
+    float* frameCosts
+);
+
+__global__
+void computeMedoidCosts(
+    int N_frames,
+    const float* __restrict__ rmsd,
+    int* centroidsGPU,
+    int* clustersGPU,
+    float* frameCostsGPU
+);
+
+__global__ 
+void updateCentroidsGPU(
+    int N_frames,
+    int K,
+    int* centroidsGPU, 
+    int* clustersGPU,
+    float* frameCosts
+);
+
+
 
 #endif // GPU_CUH

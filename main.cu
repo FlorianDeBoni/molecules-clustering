@@ -187,15 +187,21 @@ int main(int argc, char** args) {
 
     std::cout << "Centroid+G compute : "
               << (double)total_molecules_processed / centroid_time_s
-              << " molecules/s\n";
+              << " molecules/s ("
+              << centroid_time_s
+              << "s)\n";
 
     std::cout << "RMSD kernel        : "
               << (double)total_rmsd_pairs / rmsd_time_s
-              << " RMSD/s\n";
+              << " RMSD/s ("
+              << rmsd_time_s
+              << "s)\n";
 
     std::cout << "Full RMSD pipeline : "
               << (double)total_rmsd_pairs / total_pipeline_time
-              << " RMSD/s\n";
+              << " RMSD/s ("
+              << total_pipeline_time
+              << "s)\n";
 
     std::cout << "Total RMSD pairs   : "
               << total_rmsd_pairs << "\n";

@@ -21,6 +21,31 @@ inline void freeOnGPU(float* ptr) {
     if(ptr) cudaFree(ptr);
 }
 
+__global__
+void computeCentroidsG(const float* __restrict__ coords, 
+                       size_t N_atoms,
+                       size_t N_frames,
+                       float* __restrict__ centroids_x,
+                       float* __restrict__ centroids_y,
+                       float* __restrict__ centroids_z,
+                       float* __restrict__ G);
+
+__global__
+void RMSD_precomputed(const float* __restrict__ refs,
+                      const float* __restrict__ tgts,
+                      size_t N_atoms,
+                      size_t N_ref,
+                      size_t N_tgt,
+                      const float* __restrict__ cx_ref,
+                      const float* __restrict__ cy_ref,
+                      const float* __restrict__ cz_ref,
+                      const float* __restrict__ G_ref,
+                      const float* __restrict__ cx_tgt,
+                      const float* __restrict__ cy_tgt,
+                      const float* __restrict__ cz_tgt,
+                      const float* __restrict__ G_tgt,
+                      float* __restrict__ rmsd);
+
 // 2D kernel: one thread per (ref, target) pair.
 // Uses the Kabsch-Umeyama identity to eliminate the final coord re-read:
 //   RMSD^2 = (G_ref + G_tgt - 2*(s0+s1+s2)) / N

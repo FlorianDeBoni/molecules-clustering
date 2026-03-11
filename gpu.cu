@@ -49,95 +49,104 @@ void compute_eigenvalues_symmetric_3x3(float m00, float m01, float m02,
     if (lambda[0] < lambda[1]) { float t=lambda[0];lambda[0]=lambda[1];lambda[1]=t; }
 }
 
-// =======================================================
-// RMSD kernel — 2D thread layout + Kabsch-Umeyama formula
-//
-// Launch configuration:
-//   grid  : (ceil(N_tgt/16), ceil(N_ref/16))
-//   block : dim3(16, 16)
-//
-// Key optimisation over the original:
-//   The original kernel made 3 passes over both ref and target coords:
-//     Pass 1 — ref centroid
-//     Pass 2 — tgt centroid
-//     Pass 3 — correlation matrix A
-//     Pass 4 — RMSD accumulation (re-reads all coords)
-//
-//   This version makes only 2 passes using the Kabsch-Umeyama identity:
-//
-//     RMSD² = (G_ref + G_tgt - 2*(σ₀+σ₁+σ₂)) / N
-//
-//   where G = Σ|centered coords|²  and  σᵢ = sqrt(λᵢ) are the singular
-//   values of A (i.e. sqrt of eigenvalues of AᵀA = M).
-//   This eliminates the final re-read of all coordinates entirely.
-//
-//   Pass 1 (fused): centroids for ref and tgt                 [1× global read each]
-//   Pass 2 (fused): correlation matrix A + G_ref + G_tgt      [1× global read each]
-//   Total: 2 global memory passes instead of 3 — a 33% reduction
-//          in memory bandwidth for the dominant cost (target reads).
-//
-//   Note: λ₂ (the smallest eigenvalue) is now used; previously it was
-//   discarded. With --use_fast_math, all sqrtf/fmaxf remain fast.
-// =======================================================
+#include "gpu.cuh"
+#include <cuda_runtime.h>
+#include <math_constants.h>
+
 __global__
-void RMSD(const float* __restrict__ references,
-          const float* __restrict__ targets,
-          size_t N_references_subset,
-          size_t N_targets_subset,
-          size_t N_atoms,
-          float* rmsd_device)
+void computeCentroidsG(const float* coords,
+                       size_t N_atoms,
+                       size_t N_frames,
+                       float* cx,
+                       float* cy,
+                       float* cz,
+                       float* G)
 {
-    int snap_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int ref_idx  = blockIdx.y * blockDim.y + threadIdx.y;
+    int idx = blockIdx.x*blockDim.x + threadIdx.x;
+    if(idx>=N_frames) return;
 
-    if (snap_idx >= (int)N_targets_subset || ref_idx >= (int)N_references_subset)
-        return;
+    float sx=0,sy=0,sz=0;
 
-    // ── PASS 1: Centroids (ref + tgt fused, 1 global read per coord) ─────
-    float rcx=0,rcy=0,rcz=0;
-    float scx=0,scy=0,scz=0;
-
-    for (int a = 0; a < (int)N_atoms; a++) {
-        size_t br = (size_t)a * N_references_subset + ref_idx;
-        rcx += references[0*N_atoms*N_references_subset + br];
-        rcy += references[1*N_atoms*N_references_subset + br];
-        rcz += references[2*N_atoms*N_references_subset + br];
-
-        size_t bt = (size_t)a * N_targets_subset + snap_idx;
-        scx += targets[0*N_atoms*N_targets_subset + bt];
-        scy += targets[1*N_atoms*N_targets_subset + bt];
-        scz += targets[2*N_atoms*N_targets_subset + bt];
+    for(int a=0;a<N_atoms;a++){
+        size_t off=a*N_frames+idx;
+        sx+=coords[0*N_atoms*N_frames+off];
+        sy+=coords[1*N_atoms*N_frames+off];
+        sz+=coords[2*N_atoms*N_frames+off];
     }
 
-    rcx /= N_atoms; rcy /= N_atoms; rcz /= N_atoms;
-    scx /= N_atoms; scy /= N_atoms; scz /= N_atoms;
+    sx/=N_atoms; sy/=N_atoms; sz/=N_atoms;
 
-    // ── PASS 2: Correlation matrix A + G_ref + G_tgt (1 global read per coord)
-    // G_ref = Σ|rᵢ - r̄|²,  G_tgt = Σ|sᵢ - s̄|²
-    // These are accumulated alongside A at zero extra memory cost.
+    cx[idx]=sx; cy[idx]=sy; cz[idx]=sz;
+
+    float g=0;
+    for(int a=0;a<N_atoms;a++){
+        size_t off=a*N_frames+idx;
+        float rx=coords[0*N_atoms*N_frames+off]-sx;
+        float ry=coords[1*N_atoms*N_frames+off]-sy;
+        float rz=coords[2*N_atoms*N_frames+off]-sz;
+        g+=rx*rx+ry*ry+rz*rz;
+    }
+
+    G[idx]=g;
+}
+
+__global__
+void RMSD_precomputed(
+        const float* refs,
+        const float* tgts,
+        size_t N_atoms,
+        size_t N_ref,
+        size_t N_tgt,
+        const float* cx_ref,
+        const float* cy_ref,
+        const float* cz_ref,
+        const float* G_ref,
+        const float* cx_tgt,
+        const float* cy_tgt,
+        const float* cz_tgt,
+        const float* G_tgt,
+        float* rmsd)
+{
+    int r=blockIdx.y*blockDim.y+threadIdx.y;
+    int t=blockIdx.x*blockDim.x+threadIdx.x;
+
+    if(r>=N_ref || t>=N_tgt) return;
+
+    float rcx=cx_ref[r];
+    float rcy=cy_ref[r];
+    float rcz=cz_ref[r];
+
+    float scx=cx_tgt[t];
+    float scy=cy_tgt[t];
+    float scz=cz_tgt[t];
+
     float a00=0,a01=0,a02=0,a10=0,a11=0,a12=0,a20=0,a21=0,a22=0;
-    float G_ref=0, G_tgt=0;
 
-    for (int a = 0; a < (int)N_atoms; a++) {
-        size_t br = (size_t)a * N_references_subset + ref_idx;
-        float rx = references[0*N_atoms*N_references_subset + br] - rcx;
-        float ry = references[1*N_atoms*N_references_subset + br] - rcy;
-        float rz = references[2*N_atoms*N_references_subset + br] - rcz;
+    const int TILE=256;
 
-        size_t bt = (size_t)a * N_targets_subset + snap_idx;
-        float sx = targets[0*N_atoms*N_targets_subset + bt] - scx;
-        float sy = targets[1*N_atoms*N_targets_subset + bt] - scy;
-        float sz = targets[2*N_atoms*N_targets_subset + bt] - scz;
+    for(int start=0;start<N_atoms;start+=TILE){
 
-        G_ref += rx*rx + ry*ry + rz*rz;
-        G_tgt += sx*sx + sy*sy + sz*sz;
+        int end=min(start+TILE,(int)N_atoms);
 
-        a00+=rx*sx; a01+=rx*sy; a02+=rx*sz;
-        a10+=ry*sx; a11+=ry*sy; a12+=ry*sz;
-        a20+=rz*sx; a21+=rz*sy; a22+=rz*sz;
+        for(int a=start;a<end;a++){
+
+            size_t br=a*N_ref+r;
+            size_t bt=a*N_tgt+t;
+
+            float rx=refs[0*N_atoms*N_ref+br]-rcx;
+            float ry=refs[1*N_atoms*N_ref+br]-rcy;
+            float rz=refs[2*N_atoms*N_ref+br]-rcz;
+
+            float sx=tgts[0*N_atoms*N_tgt+bt]-scx;
+            float sy=tgts[1*N_atoms*N_tgt+bt]-scy;
+            float sz=tgts[2*N_atoms*N_tgt+bt]-scz;
+
+            a00+=rx*sx; a01+=rx*sy; a02+=rx*sz;
+            a10+=ry*sx; a11+=ry*sy; a12+=ry*sz;
+            a20+=rz*sx; a21+=rz*sy; a22+=rz*sz;
+        }
     }
 
-    // ── Compute M = AᵀA ───────────────────────────────────────────────────
     float m00=a00*a00+a10*a10+a20*a20;
     float m01=a00*a01+a10*a11+a20*a21;
     float m02=a00*a02+a10*a12+a20*a22;
@@ -145,20 +154,15 @@ void RMSD(const float* __restrict__ references,
     float m12=a01*a02+a11*a12+a21*a22;
     float m22=a02*a02+a12*a12+a22*a22;
 
-    // ── Eigenvalues of M (= σᵢ² of A) ────────────────────────────────────
     float lambda[3];
     compute_eigenvalues_symmetric_3x3(m00,m01,m02,m11,m12,m22,lambda);
 
-    // ── Kabsch-Umeyama: RMSD² = (G_ref + G_tgt - 2*(σ₀+σ₁+σ₂)) / N ─────
-    // σᵢ = sqrt(λᵢ).  All three eigenvalues contribute, including λ₂.
-    // fmaxf guards against tiny negative values from floating-point error.
-    float sigma_sum = sqrtf(fmaxf(lambda[0], 0.f))
-                    + sqrtf(fmaxf(lambda[1], 0.f))
-                    + sqrtf(fmaxf(lambda[2], 0.f));
+    float sigma_sum =
+        sqrtf(fmaxf(lambda[0],0.f))+
+        sqrtf(fmaxf(lambda[1],0.f))+
+        sqrtf(fmaxf(lambda[2],0.f));
 
-    float rmsd2 = (G_ref + G_tgt - 2.f * sigma_sum) / (float)N_atoms;
-    float rmsd  = sqrtf(fmaxf(rmsd2, 0.f));
+    float rmsd2=(G_ref[r]+G_tgt[t]-2.f*sigma_sum)/N_atoms;
 
-    size_t idx = (size_t)ref_idx * N_targets_subset + snap_idx;
-    rmsd_device[idx] = rmsd;
+    rmsd[r*N_tgt+t]=sqrtf(fmaxf(rmsd2,0.f));
 }

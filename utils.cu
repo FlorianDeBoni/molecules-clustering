@@ -36,27 +36,32 @@ void update_row_col(size_t idx, const size_t N_CHUNKS_PER_ROW, size_t& row, size
     row = idx - start;
 }
 
-size_t get_chunk_frame_nb(size_t max_cap_MB, size_t N_atoms, size_t N_dims) {
-    // Note, we allocate 2 * N_frames * N_atoms * N_dims floats for the coordinates
-    // We also allocate the RMSD matrix which is N_frames*N_frames floats
+size_t get_chunk_frame_nb(size_t max_cap_MB, size_t N_atoms, size_t N_dims)
+{
+    // Convert memory capacity to number of floats
+    double max_floats =
+        static_cast<double>(max_cap_MB) * 1024.0 * 1024.0 / sizeof(float);
 
-    // Convert max memory to number of floats
-    double max_floats = static_cast<double>(max_cap_MB) * 1024.0 * 1024.0 / sizeof(float);
-
-    // Quadratic formula: F_tile^2 + 2*(N_atoms*N_dims)*F_tile - max_floats = 0
+    // Real memory model:
+    // F² + (2*N_atoms*N_dims + 8)F <= max_floats
     double a = 1.0;
-    double b = 2.0 * static_cast<double>(N_atoms) * static_cast<double>(N_dims);
-    double c = - max_floats;
+    double b = 2.0 * static_cast<double>(N_atoms) *
+               static_cast<double>(N_dims) + 8.0;
+    double c = -max_floats;
 
     double delta = b*b - 4.0*a*c;
-    if(delta < 0) {
+
+    if (delta < 0) {
         std::cerr << "Error: memory too small for even one frame!" << std::endl;
         return 0;
     }
 
-    double F_tile = (-b + std::sqrt(delta)) / (2.0 * a);
-    size_t result = static_cast<size_t>(std::floor(F_tile));
-    result -= result % 32; // align to 32 for CUDA efficiency
+    double F = (-b + std::sqrt(delta)) / (2.0 * a);
+
+    size_t result = static_cast<size_t>(std::floor(F));
+
+    // Align to warp size
+    result = (result / 32) * 32;
 
     return result;
 }

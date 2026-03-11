@@ -15,18 +15,6 @@ static inline double elapsed_s(const chrono_type& start) {
     return std::chrono::duration<double>(chrono_time::now() - start).count();
 }
 
-static void print_throughput(const std::string& label,
-                             double seconds,
-                             size_t frames,
-                             int label_width = 35)
-{
-    double fps = (seconds > 0.0) ? frames / seconds : 0.0;
-    std::cout << std::left  << std::setw(label_width) << ("  [" + label + "]")
-              << std::right << std::fixed
-              << std::setw(12) << std::setprecision(0) << fps << " frames/s"
-              << "   (" << std::setprecision(3) << seconds << " s)\n";
-}
-
 int main(int argc, char** args) {
 
     chrono_type global_start = chrono_time::now();
@@ -48,11 +36,18 @@ int main(int argc, char** args) {
 
     chrono_type t_read = chrono_time::now();
     file.readSnapshotsFastInPlace(0, N_frames - 1, all_data);
-    print_throughput("Read .bin", elapsed_s(t_read), N_frames);
+    double read_time = elapsed_s(t_read);
+
+    std::cout << "Read dataset : "
+              << N_frames/read_time
+              << " molecules/s\n";
 
     const size_t MAX_DATA_CHUNK_SIZE  = 12000;
-    const size_t NB_FRAMES_PER_CHUNK  = get_chunk_frame_nb(MAX_DATA_CHUNK_SIZE, N_atoms, N_dims);
-    const size_t NB_ROW_ITERATIONS    = (size_t)std::ceil((double)N_frames / NB_FRAMES_PER_CHUNK);
+    const size_t NB_FRAMES_PER_CHUNK  =
+        get_chunk_frame_nb(MAX_DATA_CHUNK_SIZE, N_atoms, N_dims);
+
+    const size_t NB_ROW_ITERATIONS =
+        (size_t)std::ceil((double)N_frames / NB_FRAMES_PER_CHUNK);
 
     size_t rmsd_chunk_size = NB_FRAMES_PER_CHUNK * NB_FRAMES_PER_CHUNK;
     float* rmsdHostChunk   = new float[rmsd_chunk_size];
@@ -84,13 +79,29 @@ int main(int argc, char** args) {
 
     dim3 threads(32,8);
 
+    // CUDA timing
+    cudaEvent_t start_evt, stop_evt;
+    cudaEventCreate(&start_evt);
+    cudaEventCreate(&stop_evt);
+
+    float centroid_time_ms = 0.0f;
+    float rmsd_time_ms     = 0.0f;
+
+    size_t total_rmsd_pairs = 0;
+    size_t total_molecules_processed = 0;
+
+    chrono_type rmsd_pipeline_start = chrono_time::now();
+
     for (size_t row=0; row<NB_ROW_ITERATIONS; row++) {
 
         size_t start_row=row*NB_FRAMES_PER_CHUNK;
         size_t stop_row =std::min(start_row+NB_FRAMES_PER_CHUNK,N_frames);
         size_t nb_ref   =stop_row-start_row;
 
-        file.extractSnapshotsFastInPlace(start_row,stop_row,all_data,references_coordinates);
+        total_molecules_processed += nb_ref;
+
+        file.extractSnapshotsFastInPlace(
+            start_row,stop_row,all_data,references_coordinates);
 
         cudaMemcpy(d_references,references_coordinates.data(),
                    references_coordinates.size()*sizeof(float),
@@ -99,9 +110,18 @@ int main(int argc, char** args) {
         int threads1D=128;
         int blocks_ref=(nb_ref+threads1D-1)/threads1D;
 
+        cudaEventRecord(start_evt);
+
         computeCentroidsG<<<blocks_ref,threads1D>>>(
             d_references,N_atoms,nb_ref,
             d_cx_ref,d_cy_ref,d_cz_ref,d_G_ref);
+
+        cudaEventRecord(stop_evt);
+        cudaEventSynchronize(stop_evt);
+
+        float ms;
+        cudaEventElapsedTime(&ms,start_evt,stop_evt);
+        centroid_time_ms += ms;
 
         for(size_t col=row; col<NB_ROW_ITERATIONS; col++) {
 
@@ -109,7 +129,10 @@ int main(int argc, char** args) {
             size_t stop_col =std::min(start_col+NB_FRAMES_PER_CHUNK,N_frames);
             size_t nb_tgt   =stop_col-start_col;
 
-            file.extractSnapshotsFastInPlace(start_col,stop_col,all_data,targets_coordinates);
+            total_molecules_processed += nb_tgt;
+
+            file.extractSnapshotsFastInPlace(
+                start_col,stop_col,all_data,targets_coordinates);
 
             cudaMemcpy(d_targets,targets_coordinates.data(),
                        targets_coordinates.size()*sizeof(float),
@@ -117,12 +140,22 @@ int main(int argc, char** args) {
 
             int blocks_tgt=(nb_tgt+threads1D-1)/threads1D;
 
+            cudaEventRecord(start_evt);
+
             computeCentroidsG<<<blocks_tgt,threads1D>>>(
                 d_targets,N_atoms,nb_tgt,
                 d_cx_tgt,d_cy_tgt,d_cz_tgt,d_G_tgt);
 
+            cudaEventRecord(stop_evt);
+            cudaEventSynchronize(stop_evt);
+
+            cudaEventElapsedTime(&ms,start_evt,stop_evt);
+            centroid_time_ms += ms;
+
             dim3 blocks((nb_tgt+threads.x-1)/threads.x,
                         (nb_ref+threads.y-1)/threads.y);
+
+            cudaEventRecord(start_evt);
 
             RMSD_precomputed<<<blocks,threads>>>(
                 d_references,d_targets,
@@ -131,11 +164,41 @@ int main(int argc, char** args) {
                 d_cx_tgt,d_cy_tgt,d_cz_tgt,d_G_tgt,
                 d_rmsd);
 
+            cudaEventRecord(stop_evt);
+            cudaEventSynchronize(stop_evt);
+
+            cudaEventElapsedTime(&ms,start_evt,stop_evt);
+            rmsd_time_ms += ms;
+
+            total_rmsd_pairs += (size_t)nb_ref * (size_t)nb_tgt;
+
             cudaMemcpy(rmsdHostChunk,d_rmsd,
                        nb_ref*nb_tgt*sizeof(float),
                        cudaMemcpyDeviceToHost);
         }
     }
+
+    double total_pipeline_time = elapsed_s(rmsd_pipeline_start);
+
+    double centroid_time_s = centroid_time_ms / 1000.0;
+    double rmsd_time_s     = rmsd_time_ms / 1000.0;
+
+    std::cout << "\n===== PERFORMANCE =====\n";
+
+    std::cout << "Centroid+G compute : "
+              << (double)total_molecules_processed / centroid_time_s
+              << " molecules/s\n";
+
+    std::cout << "RMSD kernel        : "
+              << (double)total_rmsd_pairs / rmsd_time_s
+              << " RMSD/s\n";
+
+    std::cout << "Full RMSD pipeline : "
+              << (double)total_rmsd_pairs / total_pipeline_time
+              << " RMSD/s\n";
+
+    std::cout << "Total RMSD pairs   : "
+              << total_rmsd_pairs << "\n";
 
     cudaFree(d_references);
     cudaFree(d_targets);

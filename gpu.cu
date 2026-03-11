@@ -91,7 +91,7 @@ void computeCentroidsG(const float* coords,
 }
 
 __global__
-void RMSD_precomputed(
+void RMSD(
         const float* refs,
         const float* tgts,
         size_t N_atoms,

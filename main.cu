@@ -212,7 +212,7 @@ int main(int argc, char** args) {
 
             cudaEventRecord(start_evt);
 
-            RMSD_precomputed<<<blocks,threads>>>(
+            RMSD<<<blocks,threads>>>(
                 d_references,d_targets,
                 N_atoms,nb_ref,nb_tgt,
                 d_cx_ref,d_cy_ref,d_cz_ref,d_G_ref,
@@ -259,15 +259,21 @@ int main(int argc, char** args) {
 
     std::cout << "Centroid compute : "
               << total_molecules_processed / centroid_time_s
-              << " molecules/s\n";
+              << " molecules/s ("
+              << centroid_time_s
+              << "s)\n";
 
     std::cout << "RMSD kernel      : "
               << total_rmsd_pairs / rmsd_time_s
-              << " RMSD/s\n";
+              << " RMSD/s ("
+              << rmsd_time_s
+              << "s)\n";
 
     std::cout << "Full pipeline    : "
               << total_rmsd_pairs / pipeline_time
-              << " RMSD/s\n";
+              << " RMSD/s ("
+              << pipeline_time
+              << "s)\n";
 
     // ============================================================
     // Pack upper triangle
@@ -309,7 +315,9 @@ int main(int argc, char** args) {
 
     std::cout << "Clustering speed : "
               << N_frames / clust_time
-              << " molecules/s\n";
+              << " molecules/s ("
+              << clust_time
+              << "s)\n";
 
     std::cout << "Davies-Bouldin index : "
               << db_index << "\n";

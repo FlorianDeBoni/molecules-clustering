@@ -177,7 +177,7 @@ int main(int argc, char** args) {
     for (size_t i = p - 5; i < p + 5; ++i) {
         std::string lbl = (i == p ? ">" : "") + std::to_string(i);
         std::cout << std::setw(10) << lbl;
-        for (size_t j = p - 3; j < p + 3; ++j)
+        for (size_t j = p - 5; j < p + 5; ++j)
             std::cout << std::setw(10) << rmsdHostAll[i * N_frames + j];
         std::cout << "\n";
     }

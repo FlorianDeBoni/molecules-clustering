@@ -105,6 +105,16 @@ int main(int argc, char** args)
     size_t total_rmsd_pairs      = 0;
 
     // -----------------------------------------------------------------------
+    // Debug capture buffer: raw 2D window around the first chunk boundary.
+    // Initialised to -1 so unwritten cells are visible in the printout.
+    // -----------------------------------------------------------------------
+    const size_t window    = 5;
+    const size_t dbg_start = NB_FRAMES_PER_CHUNK - window;
+    const size_t dbg_end   = NB_FRAMES_PER_CHUNK + window;  // exclusive
+    const size_t dbg_size  = 2 * window;
+    std::vector<float> dbg(dbg_size * dbg_size, -1.f);
+
+    // -----------------------------------------------------------------------
     // RMSD computation
     // -----------------------------------------------------------------------
     for(size_t row = 0; row < NB_ROW_ITERATIONS; row++)
@@ -171,6 +181,18 @@ int main(int argc, char** args)
                                   nb_ref * nb_tgt * sizeof(float),
                                   cudaMemcpyDeviceToHost));
 
+            // Capture raw computed values into the debug window (no symmetry tricks).
+            for (size_t i = 0; i < nb_ref; i++) {
+                size_t gi = start_row + i;
+                if (gi < dbg_start || gi >= dbg_end) continue;
+                for (size_t j = 0; j < nb_tgt; j++) {
+                    size_t gj = start_col + j;
+                    if (gj < dbg_start || gj >= dbg_end) continue;
+                    dbg[(gi - dbg_start) * dbg_size + (gj - dbg_start)] =
+                        rmsdHostChunk[i * nb_tgt + j];
+                }
+            }
+
             // Pack into upper-triangle storage (row == col diagonal tile
             // contains RMSD(i,i)=0 on the diagonal; off-diagonal pairs are
             // stored with i < j).
@@ -208,14 +230,11 @@ int main(int argc, char** args)
               << " RMSD/s (" << pipeline_time << " s)\n";
 
     // -----------------------------------------------------------------------
-    // DEBUG: inspect RMSD around chunk boundary
+    // DEBUG: inspect RMSD around chunk boundary (raw, no symmetry)
     // -----------------------------------------------------------------------
-    size_t window = 5;
-
     std::cout << "\n===== RMSD TILE JUNCTION DEBUG =====\n";
     std::cout << "Inspecting frames "
-              << NB_FRAMES_PER_CHUNK - window << " .. "
-              << NB_FRAMES_PER_CHUNK + window - 1
+              << dbg_start << " .. " << dbg_end - 1
               << " around chunk boundary at frame "
               << NB_FRAMES_PER_CHUNK << "\n\n";
 
@@ -223,23 +242,22 @@ int main(int argc, char** args)
 
     // column header
     std::cout << std::setw(10) << "";
-    for(size_t j = NB_FRAMES_PER_CHUNK - window; j < NB_FRAMES_PER_CHUNK + window; j++)
-    {
+    for (size_t j = dbg_start; j < dbg_end; j++) {
         std::string label = (j == NB_FRAMES_PER_CHUNK ? ">" : "") + std::to_string(j);
         std::cout << std::setw(10) << label;
     }
     std::cout << "\n";
 
     // rows
-    for(size_t i = NB_FRAMES_PER_CHUNK - window; i < NB_FRAMES_PER_CHUNK + window; i++)
-    {
+    for (size_t i = dbg_start; i < dbg_end; i++) {
         std::string label = (i == NB_FRAMES_PER_CHUNK ? ">" : "") + std::to_string(i);
         std::cout << std::setw(10) << label;
-
-        for(size_t j = NB_FRAMES_PER_CHUNK - window; j < NB_FRAMES_PER_CHUNK + window; j++)
-        {
-            float val = getRMSD((int)i, (int)j, rmsdUpperTriangle, (int)N_frames);
-            std::cout << std::setw(10) << val;
+        for (size_t j = dbg_start; j < dbg_end; j++) {
+            float val = dbg[(i - dbg_start) * dbg_size + (j - dbg_start)];
+            if (val >= 0.f)
+                std::cout << std::setw(10) << val;
+            else
+                std::cout << std::setw(10) << "";
         }
         std::cout << "\n";
     }

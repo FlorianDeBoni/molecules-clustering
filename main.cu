@@ -112,7 +112,7 @@ int main(int argc, char** args)
     const size_t dbg_start = NB_FRAMES_PER_CHUNK - window;
     const size_t dbg_end   = NB_FRAMES_PER_CHUNK + window;  // exclusive
     const size_t dbg_size  = 2 * window;
-    std::vector<float> dbg(dbg_size * dbg_size, -1.f);
+    std::vector<float> dbg(dbg_size * dbg_size, NULL);
 
     // -----------------------------------------------------------------------
     // RMSD computation
@@ -254,10 +254,7 @@ int main(int argc, char** args)
         std::cout << std::setw(10) << label;
         for (size_t j = dbg_start; j < dbg_end; j++) {
             float val = dbg[(i - dbg_start) * dbg_size + (j - dbg_start)];
-            if (val >= 0.f)
-                std::cout << std::setw(10) << val;
-            else
-                std::cout << std::setw(10) << "";
+            std::cout << std::setw(10) << val;
         }
         std::cout << "\n";
     }

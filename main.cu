@@ -68,7 +68,7 @@ int main(int argc, char** args) {
     // ── Allocations ───────────────────────────────────────────────────────────
     size_t rmsd_all_size   = N_frames * N_frames;
     float* rmsdHostAll     = new float[rmsd_all_size];
-    std::vector<float> rmsdHostAll(rmsd_all_size, -1.0f);
+    std::fill(rmsdHostAll, rmsdHostAll + rmsd_all_size, -1.0f);
 
     size_t rmsd_chunk_size = NB_FRAMES_PER_CHUNK * NB_FRAMES_PER_CHUNK;
     float* rmsdHostChunk   = new float[rmsd_chunk_size];

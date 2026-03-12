@@ -46,7 +46,7 @@ struct CudaTimer {
             if (!m.stopped) continue;
             float ms = 0;
             cudaEventElapsedTime(&ms, m.start, m.stop);
-            printf("%-30s %10.3f ms\n", m.label.c_str(), ms/1000);
+            printf("%-30s %10.3f s\n", m.label.c_str(), ms/1000);
         }
     }
 

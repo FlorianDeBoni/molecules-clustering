@@ -50,7 +50,7 @@ int main(int argc, char** args)
     // -----------------------------------------------------------------------
     // Chunk sizing
     // -----------------------------------------------------------------------
-    const size_t MAX_DATA_CHUNK_SIZE = 2500;
+    const size_t MAX_DATA_CHUNK_SIZE = 500;
     const size_t NB_FRAMES_PER_CHUNK = get_chunk_frame_nb(MAX_DATA_CHUNK_SIZE, N_atoms, N_dims);
     const size_t NB_ROW_ITERATIONS   = (size_t)std::ceil((double)N_frames / NB_FRAMES_PER_CHUNK);
 

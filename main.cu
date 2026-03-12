@@ -11,6 +11,7 @@
     ./main output/snapshots_coords_all.bin
 */
 
+#include "CudaTimer.cuh"
 #include "FileUtils.hpp"
 #include <iostream>
 #include <fstream>
@@ -20,41 +21,12 @@
 #include "gpu.cuh"
 #include <cuda_runtime.h>
 #include <stdio.h>
-#include <chrono>
 #include <iomanip>
 #include "utils.cuh"
 
-static void print_vram_usage(const std::string& label) {
-    size_t free_bytes, total_bytes;
-    cudaMemGetInfo(&free_bytes, &total_bytes);
-    size_t used_bytes = total_bytes - free_bytes;
-    std::cout << "  [VRAM @ " << label << "] "
-            << "Used: "  << used_bytes  / (1024*1024) << " MiB"
-            << " | Free: " << free_bytes  / (1024*1024) << " MiB"
-            << " | Total: "<< total_bytes / (1024*1024) << " MiB\n";
-};
-
-// ─── throughput helper ───────────────────────────────────────────────────────
-static inline double elapsed_s(const chrono_type& start) {
-    return std::chrono::duration<double>(chrono_time::now() - start).count();
-}
-
-static void print_throughput(const std::string& label,
-                             double seconds,
-                             size_t frames,
-                             int label_width = 35)
-{
-    double fps = (seconds > 0.0) ? frames / seconds : 0.0;
-    std::cout << std::left  << std::setw(label_width) << ("  [" + label + "]")
-              << std::right << std::fixed
-              << std::setw(12) << std::setprecision(0) << fps << " frames/s"
-              << "   (" << std::setprecision(3) << seconds << " s)\n";
-}
-// ─────────────────────────────────────────────────────────────────────────────
-
 int main(int argc, char** args) {
 
-    chrono_type global_start = chrono_time::now();
+    CudaTimer timer;
 
     std::string file_name;
     if (argc >= 2) {
@@ -64,6 +36,7 @@ int main(int argc, char** args) {
         return 1;
     }
 
+    timer.start("1. Loading .bin");
     FileUtils file(file_name);
 
     size_t N_frames = 90000;
@@ -77,13 +50,11 @@ int main(int argc, char** args) {
 
     std::vector<float> all_data(N_frames * N_atoms * 3);
 
-    chrono_type t_read = chrono_time::now();
     file.readSnapshotsFastInPlace(0, N_frames - 1, all_data);
-    double read_s = elapsed_s(t_read);
+    timer.stop("1. Loading .bin");
 
     std::cout << "Loaded " << N_frames * N_atoms * N_dims * sizeof(float) / (1024*1024)
               << " MiB into CPU RAM.\n";
-    print_throughput("Read .bin", read_s, N_frames);
 
     // ── Chunk sizing ──────────────────────────────────────────────────────────
     const size_t MAX_DATA_CHUNK_SIZE  = 500; // MB
@@ -116,9 +87,6 @@ int main(int argc, char** args) {
     size_t size_rmsd = NB_FRAMES_PER_CHUNK * NB_FRAMES_PER_CHUNK * sizeof(float);
 
     // ── Accumulators for aggregate throughput ─────────────────────────────────
-    double total_extract_s  = 0.0;
-    double total_kernel_s   = 0.0;
-    size_t total_rmsd_pairs = 0;
 
     size_t iter = 0;
 
@@ -126,15 +94,14 @@ int main(int argc, char** args) {
     std::cout << "RMSD COMPUTATION START\n";
     std::cout << std::string(70, '=') << "\n";
 
+    timer.start("2. Computing RMSD");
     for (size_t row = 0; row < NB_ROW_ITERATIONS; ++row) {
         size_t start_row = row * NB_FRAMES_PER_CHUNK;
         size_t stop_row  = std::min(start_row + NB_FRAMES_PER_CHUNK, N_frames);
         const size_t nb_ref = stop_row - start_row;
 
         // ── Extract references chunk ──────────────────────────────────────────
-        chrono_type t_extract_ref = chrono_time::now();
         file.extractSnapshotsFastInPlace(start_row, stop_row, all_data, references_coordinates);
-        total_extract_s += elapsed_s(t_extract_ref);
 
         CHECK_SUCCESS(cudaMemcpy(d_references, references_coordinates.data(),
                                  references_coordinates.size() * sizeof(float),
@@ -145,16 +112,8 @@ int main(int argc, char** args) {
             size_t stop_col  = std::min(start_col + NB_FRAMES_PER_CHUNK, N_frames);
             const size_t nb_tgt = stop_col - start_col;
 
-            std::cout << "\nIteration " << ++iter << "/" << RMSD_LOOPS_NEEDED
-                      << "  Row [" << start_row << "," << stop_row << ")"
-                      << "  Col [" << start_col << "," << stop_col << ")\n";
-
             // ── Extract targets chunk ─────────────────────────────────────────
-            chrono_type t_extract_tgt = chrono_time::now();
             file.extractSnapshotsFastInPlace(start_col, stop_col, all_data, targets_coordinates);
-            double ext_s = elapsed_s(t_extract_tgt);
-            total_extract_s += ext_s;
-            print_throughput("Extract targets chunk", ext_s, nb_tgt);
 
             CHECK_SUCCESS(cudaMemcpy(d_targets, targets_coordinates.data(),
                                      targets_coordinates.size() * sizeof(float),
@@ -166,18 +125,12 @@ int main(int argc, char** args) {
 
             CHECK_SUCCESS(cudaDeviceSynchronize(), "Ready to launch RMSD Kernel");
 
-            chrono_type t_kernel = chrono_time::now();
             RMSD<<<blocks, threads>>>(
                 d_references, d_targets,
                 nb_ref, nb_tgt, N_atoms,
                 d_rmsd
             );
             CHECK_SUCCESS(cudaDeviceSynchronize(), "RMSD Kernel");
-            double kern_s = elapsed_s(t_kernel);
-            total_kernel_s  += kern_s;
-            total_rmsd_pairs += nb_ref * nb_tgt;
-
-            print_throughput("RMSD kernel (pairs/s)", kern_s, nb_ref * nb_tgt);
 
             CHECK_SUCCESS(cudaMemcpy(rmsdHostChunk, d_rmsd, size_rmsd,
                                      cudaMemcpyDeviceToHost), "Copying RMSD chunk to CPU");
@@ -192,37 +145,11 @@ int main(int argc, char** args) {
                     rmsdHostAll[global_idx] = rmsdHostChunk[chunk_idx];
                 }
             }
-
-            // ── Print bottom-right 5x5 corner of first tile ──────────────────
-            if (row == 0 && col == 0) {
-                size_t preview = 5;
-                size_t corner  = nb_ref - preview;
-                std::cout << "\n  Bottom-right 5x5 corner of tile (0,0)"
-                          << " [frames " << corner << ".." << (corner + preview - 1) << "]:\n";
-                std::cout << std::fixed << std::setprecision(4);
-                std::cout << std::setw(10) << "";
-                for (size_t j = 0; j < preview; ++j)
-                    std::cout << std::setw(10) << (corner + j);
-                std::cout << "\n";
-                for (size_t i = 0; i < preview; ++i) {
-                    std::cout << std::setw(10) << (corner + i);
-                    for (size_t j = 0; j < preview; ++j) {
-                        size_t chunk_idx = (corner + i) * nb_tgt + (corner + j);
-                        std::cout << std::setw(10) << rmsdHostChunk[chunk_idx];
-                    }
-                    std::cout << "\n";
-                }
-                std::cout << "\n";
-            }
         }
     }
+    timer.stop("2. Computing RMSD");
 
     // ── Aggregate RMSD throughput ─────────────────────────────────────────────
-    std::cout << "\n" << std::string(70, '-') << "\n";
-    std::cout << "RMSD PHASE SUMMARY\n";
-    print_throughput("Extract (all chunks, avg)", total_extract_s, N_frames);
-    print_throughput("Kernel  (all chunks, pairs/s)", total_kernel_s, total_rmsd_pairs);
-
     CHECK_SUCCESS(cudaFree(d_references), "Freeing References on GPU");
     CHECK_SUCCESS(cudaFree(d_rmsd),       "Freeing RMSD vector on GPU");
     CHECK_SUCCESS(cudaFree(d_targets),    "Freeing Targets on GPU");
@@ -236,18 +163,18 @@ int main(int argc, char** args) {
         for (size_t j = i + 1; j < N_frames; ++j)
             rmsdUpperTriangle[idx++] = rmsdHostAll[i * N_frames + j];
 
-    // ── Debug: 6x6 window centered on bottom-right corner of tile (0,0) ──────
+    // ── Debug: 10x10 window centered on bottom-right corner of tile (0,0) ──────
 
     size_t p = NB_FRAMES_PER_CHUNK;
-    std::cout << "\n  6x6 window around tile (0,0) corner (boundary at frame " << p << "):\n";
+    std::cout << "\n  10x10 window around tile (0,0) corner (boundary at frame " << p << "):\n";
     std::cout << std::fixed << std::setprecision(4);
     std::cout << std::setw(10) << "";
-    for (size_t j = p - 3; j < p + 3; ++j) {
+    for (size_t j = p - 5; j < p + 5; ++j) {
         std::string lbl = (j == p ? ">" : "") + std::to_string(j);
         std::cout << std::setw(10) << lbl;
     }
     std::cout << "\n";
-    for (size_t i = p - 3; i < p + 3; ++i) {
+    for (size_t i = p - 5; i < p + 5; ++i) {
         std::string lbl = (i == p ? ">" : "") + std::to_string(i);
         std::cout << std::setw(10) << lbl;
         for (size_t j = p - 3; j < p + 3; ++j)
@@ -264,7 +191,6 @@ int main(int argc, char** args) {
     std::cout << "\n" << std::string(70, '=') << "\n";
     std::cout << "RMSD COMPUTATION COMPLETE\n";
     std::cout << std::string(70, '=') << "\n";
-    measure_seconds(global_start, "Total RMSD computation time");
 
     // ── K-medoids ─────────────────────────────────────────────────────────────
     std::cout << "\n" << std::string(70, '=') << "\n";
@@ -272,13 +198,9 @@ int main(int argc, char** args) {
     std::cout << std::string(70, '=') << "\n";
 
     // ---------------- CLUSTERING GPU -----------------
-    print_vram_usage("RIGHT BEFORE CLUSTERING");
-    chrono_type clustering_loop_start = chrono_time::now();
     float* d_rmsdUpperTriangle = nullptr;
     size_t tri_bytes = upper_triangle_size * sizeof(float);
     CHECK_SUCCESS(cudaMalloc(&d_rmsdUpperTriangle, tri_bytes), "Alloc rmsd upper triangle on GPU");
-    CHECK_SUCCESS(cudaMemcpy(d_rmsdUpperTriangle, rmsdUpperTriangle, tri_bytes,
-                cudaMemcpyHostToDevice), "Copy rmsd upper triangle to GPU");
 
     int* clusters = new int[N_frames];
     int* clustersGPU;
@@ -288,14 +210,15 @@ int main(int argc, char** args) {
     int* centroids = new int[K];
     int* centroidsGPU;
     CHECK_SUCCESS(cudaMalloc(&centroidsGPU, K * sizeof(int)), "Allocating centroidsGPU");
+    timer.start("3. Computing Clusters");
+    CHECK_SUCCESS(cudaMemcpy(d_rmsdUpperTriangle, rmsdUpperTriangle, tri_bytes,
+                cudaMemcpyHostToDevice), "Copy rmsd upper triangle to GPU");
     pickKMedoidsPlusPlus(N_frames, K, rmsdUpperTriangle, centroids);
     CHECK_SUCCESS(cudaMemcpy(centroidsGPU, centroids, K*sizeof(int), cudaMemcpyHostToDevice), "Memcpy centroids -> centroidsGPU");
 
     // costs for each centroid candidate
     float* frameCostsGPU;
     CHECK_SUCCESS(cudaMalloc(&frameCostsGPU, N_frames * sizeof(float)), "Allocating frameCostsGPU");
-
-    measure_seconds(clustering_loop_start, "==> Clustering memory setup");
 
     // Assignment step params
     dim3 clusteringThreads(1024);
@@ -306,7 +229,6 @@ int main(int argc, char** args) {
     dim3 reducingBlocks(K);
     size_t sharedMemSize = threadsPerClusterBlock.x * (sizeof(float) + sizeof(int));
 
-    print_vram_usage("DURING CLUSTERING");
     for (int iter = 0; iter < MAX_ITER; iter++) {
         runKMedoidsGPU<<<clusteringBlocks, clusteringThreads>>>(
             N_frames,
@@ -337,14 +259,11 @@ int main(int argc, char** args) {
             frameCostsGPU
         );
     }
+    timer.stop("3. Computing Clusters");
 
     CHECK_SUCCESS(cudaFree(d_rmsdUpperTriangle), "Freeing rmsd upper triangle on GPU");
     CHECK_SUCCESS(cudaMemcpy(centroids, centroidsGPU, K * sizeof(int), cudaMemcpyDeviceToHost), "Memcpy centroidsGPU -> centroids");
     CHECK_SUCCESS(cudaMemcpy(clusters, clustersGPU, N_frames * sizeof(int), cudaMemcpyDeviceToHost), "Memcpy clustersGPU -> clusters");
-
-    double clust_s = elapsed_s(clustering_loop_start);
-    print_throughput("Cluster assignments (frames/s)", clust_s, N_frames);
-    measure_seconds(clustering_loop_start, "==> Clustering Total time");
 
     float db_index = daviesBouldinIndex(N_frames, K, clusters, centroids, rmsdUpperTriangle);
     // float db_index = runKMedoids(N_frames, K, rmsdUpperTriangle, MAX_ITER, centroids, clusters);
@@ -389,7 +308,9 @@ int main(int argc, char** args) {
 
     saveClusters(clusters, N_frames, centroids, K);
 
-    measure_seconds(global_start, "Total program execution time");
+
+    timer.print();
+    std::cout << std::string(70, '=') << "\n";
 
     delete[] centroids;
     delete[] rmsdUpperTriangle;

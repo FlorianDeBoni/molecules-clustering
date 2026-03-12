@@ -88,8 +88,6 @@ int main(int argc, char** args) {
 
     // ── Accumulators for aggregate throughput ─────────────────────────────────
 
-    size_t iter = 0;
-
     std::cout << "\n" << std::string(70, '=') << "\n";
     std::cout << "RMSD COMPUTATION START\n";
     std::cout << std::string(70, '=') << "\n";

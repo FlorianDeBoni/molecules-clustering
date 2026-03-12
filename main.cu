@@ -44,11 +44,6 @@ int main(int argc, char** args)
     size_t N_atoms  = file.getN_atoms();
     size_t N_dims   = file.getN_dims();
 
-    std::cout << "\n===== DATASET INFO =====\n";
-    std::cout << "Frames  : " << N_frames << "\n";
-    std::cout << "Atoms   : " << N_atoms  << "\n";
-    std::cout << "Streams : " << N_STREAMS << "\n\n";
-
     std::vector<float> all_data(N_frames * N_atoms * 3);
     file.readSnapshotsFastInPlace(0, N_frames - 1, all_data);
 
@@ -56,17 +51,47 @@ int main(int argc, char** args)
     // Chunk sizing
     // -----------------------------------------------------------------------
     const size_t MAX_DATA_CHUNK_SIZE = 2500;
-    // ---------------------------------------------------------------------------
-    // Number of concurrent CUDA streams.
-    // Tune based on GPU memory: each stream allocates its own target + rmsd buffers.
-    // Set to 1 to benchmark baseline with no stream overlap.
-    // ---------------------------------------------------------------------------
-    static const int N_STREAMS = (size_t)std::floor((double)24000 / MAX_DATA_CHUNK_SIZE);
     const size_t NB_FRAMES_PER_CHUNK = get_chunk_frame_nb(MAX_DATA_CHUNK_SIZE, N_atoms, N_dims);
     const size_t NB_ROW_ITERATIONS   = (size_t)std::ceil((double)N_frames / NB_FRAMES_PER_CHUNK);
 
+    // -----------------------------------------------------------------------
+    // Auto-compute N_STREAMS from available GPU memory
+    // -----------------------------------------------------------------------
+
+    // Memory for shared reference buffers (allocated once, not per stream)
+    size_t shared_mem = NB_FRAMES_PER_CHUNK * N_atoms * 3 * sizeof(float)  // d_references
+                      + NB_FRAMES_PER_CHUNK * sizeof(float) * 4;           // d_cx/cy/cz/G_ref
+
+    // Memory cost per stream
+    size_t per_stream_gpu  = NB_FRAMES_PER_CHUNK * N_atoms * 3 * sizeof(float)   // d_targets
+                           + NB_FRAMES_PER_CHUNK * NB_FRAMES_PER_CHUNK * sizeof(float)  // d_rmsd
+                           + NB_FRAMES_PER_CHUNK * sizeof(float) * 4;             // d_cx/cy/cz/G_tgt
+    size_t per_stream_host = NB_FRAMES_PER_CHUNK * NB_FRAMES_PER_CHUNK * sizeof(float); // pinned rmsdHostChunk
+
+    size_t free_mem, total_mem;
+    CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
+
+    // Leave 10% headroom for CUDA context and driver overhead
+    size_t usable_mem = (size_t)(free_mem * 0.90);
+    if (usable_mem < shared_mem) {
+        std::cerr << "Not enough GPU memory even for shared buffers.\n";
+        return 1;
+    }
+    usable_mem -= shared_mem;
+
+    int N_STREAMS = (int)std::max((size_t)1, usable_mem / per_stream_gpu);
+    N_STREAMS     = std::min(N_STREAMS, 8);  // cap: beyond 8 the scheduling overhead outweighs gains
+
+    std::cout << "\n===== DATASET INFO =====\n";
+    std::cout << "Frames         : " << N_frames << "\n";
+    std::cout << "Atoms          : " << N_atoms  << "\n";
     std::cout << "Chunk size     : " << NB_FRAMES_PER_CHUNK << " frames\n";
-    std::cout << "Row iterations : " << NB_ROW_ITERATIONS   << "\n\n";
+    std::cout << "Row iterations : " << NB_ROW_ITERATIONS   << "\n";
+    std::cout << "GPU free mem   : " << free_mem / (1024*1024) << " MiB\n";
+    std::cout << "Shared mem     : " << shared_mem / (1024*1024) << " MiB\n";
+    std::cout << "Per-stream mem : " << per_stream_gpu / (1024*1024) << " MiB (GPU) + "
+              << per_stream_host / (1024*1024) << " MiB (pinned host)\n";
+    std::cout << "N_STREAMS      : " << N_STREAMS << "\n\n";
 
     // -----------------------------------------------------------------------
     // Host buffers
@@ -86,18 +111,17 @@ int main(int argc, char** args)
     CUDA_CHECK(cudaMalloc(&d_G_ref,      NB_FRAMES_PER_CHUNK * sizeof(float)));
 
     // -----------------------------------------------------------------------
-    // GPU: per-stream target + result buffers
+    // GPU: per-stream buffers — all vectors sized at runtime
     // -----------------------------------------------------------------------
-    cudaStream_t streams[N_STREAMS];
-    float *d_targets[N_STREAMS], *d_rmsd[N_STREAMS];
-    float *d_cx_tgt[N_STREAMS],  *d_cy_tgt[N_STREAMS];
-    float *d_cz_tgt[N_STREAMS],  *d_G_tgt[N_STREAMS];
-    // Pinned host memory: mandatory for cudaMemcpyAsync to overlap with kernel execution.
-    float *rmsdHostChunk[N_STREAMS];
+    std::vector<cudaStream_t> streams(N_STREAMS);
+    std::vector<float*> d_targets(N_STREAMS), d_rmsd(N_STREAMS);
+    std::vector<float*> d_cx_tgt(N_STREAMS),  d_cy_tgt(N_STREAMS);
+    std::vector<float*> d_cz_tgt(N_STREAMS),  d_G_tgt(N_STREAMS);
+    std::vector<float*> rmsdHostChunk(N_STREAMS);  // pinned
 
-    // Per-stream CUDA events for accurate GPU-side timing.
-    cudaEvent_t ev_rmsd_start[N_STREAMS], ev_rmsd_stop[N_STREAMS];
-    cudaEvent_t ev_cent_start[N_STREAMS], ev_cent_stop[N_STREAMS];
+    // Per-stream CUDA events for accurate GPU-side timing
+    std::vector<cudaEvent_t> ev_rmsd_start(N_STREAMS), ev_rmsd_stop(N_STREAMS);
+    std::vector<cudaEvent_t> ev_cent_start(N_STREAMS), ev_cent_stop(N_STREAMS);
 
     for (int s = 0; s < N_STREAMS; s++) {
         CUDA_CHECK(cudaStreamCreate(&streams[s]));
@@ -107,6 +131,7 @@ int main(int argc, char** args)
         CUDA_CHECK(cudaMalloc(&d_cy_tgt[s],  NB_FRAMES_PER_CHUNK * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_cz_tgt[s],  NB_FRAMES_PER_CHUNK * sizeof(float)));
         CUDA_CHECK(cudaMalloc(&d_G_tgt[s],   NB_FRAMES_PER_CHUNK * sizeof(float)));
+        // cudaMallocHost = page-locked; mandatory for cudaMemcpyAsync to actually overlap
         CUDA_CHECK(cudaMallocHost(&rmsdHostChunk[s],
                                   NB_FRAMES_PER_CHUNK * NB_FRAMES_PER_CHUNK * sizeof(float)));
         CUDA_CHECK(cudaEventCreate(&ev_rmsd_start[s]));
@@ -115,21 +140,20 @@ int main(int argc, char** args)
         CUDA_CHECK(cudaEventCreate(&ev_cent_stop[s]));
     }
 
-    // CUDA events for reference centroid timing (runs on default stream).
+    // CUDA events for reference centroid timing (runs on default stream)
     cudaEvent_t ev_ref_cent_start, ev_ref_cent_stop;
     CUDA_CHECK(cudaEventCreate(&ev_ref_cent_start));
     CUDA_CHECK(cudaEventCreate(&ev_ref_cent_stop));
 
     dim3 threads(32, 8);
 
-    // Accumulated GPU time in milliseconds (measured via CUDA events).
-    double centroid_time_ms = 0.0;
-    double rmsd_time_ms     = 0.0;
+    double centroid_time_ms  = 0.0;
+    double rmsd_time_ms      = 0.0;
     size_t total_centroid_frames = 0;
     size_t total_rmsd_pairs      = 0;
 
     // -----------------------------------------------------------------------
-    // Debug capture buffer: raw 2D window around the first chunk boundary.
+    // Debug capture buffer: raw 2D window around the first chunk boundary
     // -----------------------------------------------------------------------
     const size_t window    = 5;
     const size_t dbg_start = NB_FRAMES_PER_CHUNK - window;
@@ -139,9 +163,6 @@ int main(int argc, char** args)
 
     std::vector<float> references_coordinates;
 
-    // -----------------------------------------------------------------------
-    // Tile metadata
-    // -----------------------------------------------------------------------
     struct TileMeta {
         size_t start_col, stop_col, nb_tgt;
         int    stream_id;
@@ -159,13 +180,13 @@ int main(int argc, char** args)
         std::cout << "Processing row chunk " << row + 1 << "/" << NB_ROW_ITERATIONS
                   << " (" << nb_ref << " frames)\n";
 
-        // Upload reference tile (blocking; happens once per row).
+        // Upload reference tile (blocking; happens once per row)
         file.extractSnapshotsFastInPlace(start_row, stop_row, all_data, references_coordinates);
         CUDA_CHECK(cudaMemcpy(d_references, references_coordinates.data(),
                               references_coordinates.size() * sizeof(float),
                               cudaMemcpyHostToDevice));
 
-        // Centroid for references — default stream, must finish before any RMSD kernel.
+        // Centroid for references — default stream, must finish before any RMSD kernel
         CUDA_CHECK(cudaEventRecord(ev_ref_cent_start, 0));
         computeCentroidsG<<<(nb_ref + 127) / 128, 128>>>(
             d_references, N_atoms, nb_ref,
@@ -179,7 +200,7 @@ int main(int argc, char** args)
         total_centroid_frames += nb_ref;
 
         // ----------------------------------------------------------------
-        // Build tile list for this row.
+        // Build tile list for this row
         // ----------------------------------------------------------------
         std::vector<TileMeta> tiles;
         tiles.reserve(NB_ROW_ITERATIONS - row);
@@ -193,9 +214,8 @@ int main(int argc, char** args)
         }
 
         // ----------------------------------------------------------------
-        // FIX: Pre-extract ALL tile coordinates on the CPU before touching
-        // any GPU stream.  This eliminates the CPU stall that previously
-        // serialised stream launches inside the dispatch loop.
+        // Pre-extract ALL tile coordinates before touching any GPU stream,
+        // eliminating CPU stalls between stream launches.
         // ----------------------------------------------------------------
         std::vector<std::vector<float>> all_tile_coords(tiles.size());
         for (size_t ti = 0; ti < tiles.size(); ti++) {
@@ -218,19 +238,16 @@ int main(int argc, char** args)
                 const TileMeta& tm = tiles[ti];
                 int s              = tm.stream_id;
 
-                // H2D: targets (async, overlaps with kernels on other streams)
                 CUDA_CHECK(cudaMemcpyAsync(d_targets[s], all_tile_coords[ti].data(),
                                           tm.nb_tgt * N_atoms * 3 * sizeof(float),
                                           cudaMemcpyHostToDevice, streams[s]));
 
-                // Centroid kernel — record GPU event for real timing
                 CUDA_CHECK(cudaEventRecord(ev_cent_start[s], streams[s]));
                 computeCentroidsG<<<(tm.nb_tgt + 127) / 128, 128, 0, streams[s]>>>(
                     d_targets[s], N_atoms, tm.nb_tgt,
                     d_cx_tgt[s], d_cy_tgt[s], d_cz_tgt[s], d_G_tgt[s]);
                 CUDA_CHECK(cudaEventRecord(ev_cent_stop[s], streams[s]));
 
-                // RMSD kernel
                 dim3 blocks((tm.nb_tgt + threads.x - 1) / threads.x,
                             (nb_ref    + threads.y - 1) / threads.y);
                 size_t smem_bytes = 3 * threads.x * threads.y * sizeof(float);
@@ -243,7 +260,6 @@ int main(int argc, char** args)
                     d_rmsd[s]);
                 CUDA_CHECK(cudaEventRecord(ev_rmsd_stop[s], streams[s]));
 
-                // D2H: results (async, pinned memory)
                 CUDA_CHECK(cudaMemcpyAsync(rmsdHostChunk[s], d_rmsd[s],
                                           nb_ref * tm.nb_tgt * sizeof(float),
                                           cudaMemcpyDeviceToHost, streams[s]));
@@ -272,7 +288,6 @@ int main(int argc, char** args)
                 const TileMeta& tm = tiles[ti];
                 int s              = tm.stream_id;
 
-                // Debug window capture
                 for (size_t i = 0; i < nb_ref; i++) {
                     size_t gi = start_row + i;
                     if (gi < dbg_start || gi >= dbg_end) continue;
@@ -284,7 +299,6 @@ int main(int argc, char** args)
                     }
                 }
 
-                // Pack into upper-triangle (global_i < global_j only)
                 for (size_t i = 0; i < nb_ref; i++) {
                     size_t global_i = start_row + i;
                     for (size_t j = 0; j < tm.nb_tgt; j++) {
@@ -302,9 +316,7 @@ int main(int argc, char** args)
         }
     }
 
-    double pipeline_time = elapsed_s(global_start);
-
-    // Convert GPU event times from ms to seconds for consistent reporting.
+    double pipeline_time   = elapsed_s(global_start);
     double centroid_time_s = centroid_time_ms / 1000.0;
     double rmsd_time_s     = rmsd_time_ms     / 1000.0;
 

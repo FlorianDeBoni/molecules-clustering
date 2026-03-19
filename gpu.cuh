@@ -3,6 +3,7 @@
 
 #include <cuda_runtime.h>
 #include <iostream>
+#include <thrust/device_vector.h>
 
 // Simple macro for CUDA errors
 #define CHECK_SUCCESS(exp, msg) { \
@@ -59,8 +60,10 @@ __global__
 void computeMedoidCosts(
     int N_frames,
     const float* __restrict__ rmsd,
-    int* clustersGPU,
-    float* frameCostsGPU
+    const int*   __restrict__ clustersGPU,      // original mapping, read-only
+    const int*   __restrict__ sorted_frames,    // frame IDs sorted by cluster
+    const int*   __restrict__ cluster_offsets,  // [K+1]
+    float* frameCosts
 );
 
 __global__ 

@@ -23,6 +23,51 @@
 #include <chrono>
 #include <iomanip>
 #include "utils.cuh"
+#include <thrust/device_vector.h>
+#include <thrust/sequence.h>
+#include <thrust/sort.h>
+#include <thrust/reduce.h>
+#include <thrust/scan.h>
+#include <thrust/iterator/constant_iterator.h>
+#include <thrust/execution_policy.h>
+
+
+void buildClusterIndex(
+    int N_frames,
+    int K,
+    const int* clustersGPU,                // original, never touched
+    thrust::device_vector<int>& sorted_frames,   // out: frame IDs sorted by cluster
+    thrust::device_vector<int>& cluster_offsets  // out: [K+1] start of each cluster
+) {
+    // 1. Make a sortable copy of labels + corresponding frame indices
+    thrust::device_vector<int> labels_copy(clustersGPU, clustersGPU + N_frames);
+    sorted_frames.resize(N_frames);
+    thrust::sequence(sorted_frames.begin(), sorted_frames.end()); // 0,1,2,...,N-1
+
+    // 2. Sort frame indices by cluster label → sorted_frames[i] gives frame ID,
+    //    labels_copy[i] gives its cluster. clustersGPU is NOT touched.
+    thrust::sort_by_key(labels_copy.begin(), labels_copy.end(), sorted_frames.begin());
+
+    // 3. Build offsets via exclusive scan of per-cluster counts
+    cluster_offsets.assign(K + 1, 0);
+    thrust::device_vector<int> counts(K, 0);
+    thrust::device_vector<int> keys_out(K);
+    thrust::device_vector<int> counts_out(K);
+
+    auto new_end = thrust::reduce_by_key(
+        labels_copy.begin(), labels_copy.end(),
+        thrust::constant_iterator<int>(1),
+        keys_out.begin(),
+        counts_out.begin()
+    );
+    int n_keys = new_end.first - keys_out.begin(); // should equal K
+
+    // exclusive_scan on counts gives start offset of each cluster
+    thrust::exclusive_scan(counts_out.begin(), counts_out.begin() + n_keys,
+                           cluster_offsets.begin());
+    cluster_offsets[K] = N_frames; // sentinel
+}
+
 
 static void print_vram_usage(const std::string& label) {
     size_t free_bytes, total_bytes;
@@ -257,6 +302,10 @@ int main(int argc, char** args) {
     dim3 clusteringThreads(1024);
     dim3 clusteringBlocks((N_frames + clusteringThreads.x - 1) / clusteringThreads.x);
 
+    // Compute medoid
+    thrust::device_vector<int> sorted_frames;
+    thrust::device_vector<int> cluster_offsets;
+
     // Centroids update step params
     dim3 threadsPerClusterBlock(1024);
     dim3 reducingBlocks(K);
@@ -264,6 +313,7 @@ int main(int argc, char** args) {
 
     double assignment_time = 0.0;
     double medoid_cost_time = 0.0;
+    double sorting_time = 0.0;
     for (int iter = 0; iter < MAX_ITER; iter++) {
         chrono_type assignment_start = chrono_time::now();
         runKMedoidsGPU<<<clusteringBlocks, clusteringThreads>>>(
@@ -279,10 +329,15 @@ int main(int argc, char** args) {
         assignment_time += elapsed_s(assignment_start);
         chrono_type medoid_cost_start = chrono_time::now();
 
-        computeMedoidCosts<<<clusteringBlocks, clusteringThreads>>>(
+        buildClusterIndex(N_frames, K, clustersGPU, sorted_frames, cluster_offsets);
+        sorting_time += elapsed_s(medoid_cost_start);
+
+        computeMedoidCosts<<<K, 1024>>>(
             N_frames,
             d_rmsdUpperTriangle,
-            clustersGPU,
+            clustersGPU,                                    // untouched original
+            thrust::raw_pointer_cast(sorted_frames.data()),
+            thrust::raw_pointer_cast(cluster_offsets.data()),
             frameCostsGPU
         );
 
@@ -304,6 +359,7 @@ int main(int argc, char** args) {
     double clust_s = elapsed_s(clustering_loop_start);
     std::cout << "===> Assignment time: " << assignment_time << '\n';
     std::cout << "===> Medoid cost time: " << medoid_cost_time << '\n';
+    std::cout << "====> cost sorting time: " << sorting_time << '\n';
     std::cout << "===> Update medoids time: " << clust_s - assignment_time - medoid_cost_time - mem_setup << '\n';
     print_throughput("Cluster assignments (frames/s)", clust_s, N_frames);
     measure_seconds(clustering_loop_start, "==> Clustering Total time");

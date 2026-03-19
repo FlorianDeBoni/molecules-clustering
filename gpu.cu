@@ -282,34 +282,33 @@ void runKMedoidsGPU(
     clustersGPU[frame_id] = best_cluster;
 }
 
-__global__ 
+
+__global__
 void computeMedoidCosts(
     int N_frames,
     const float* __restrict__ rmsd,
-    int* clustersGPU,
+    const int*   __restrict__ clustersGPU,      // original mapping, read-only
+    const int*   __restrict__ sorted_frames,    // frame IDs sorted by cluster
+    const int*   __restrict__ cluster_offsets,  // [K+1]
     float* frameCosts
-)
-{
-    // Assigning each frame to a cluster
-    int frame_id = blockDim.x * blockIdx.x + threadIdx.x;
+) {
+    int k     = blockIdx.x;                     // one block per cluster
+    int start = cluster_offsets[k];
+    int end   = cluster_offsets[k + 1];
+    int c_size = end - start;
 
-    if (frame_id >= N_frames) {
-        return;
-    }
+    for (int i = threadIdx.x; i < c_size; i += blockDim.x) {
+        int frame_id = sorted_frames[start + i];
+        float cost = 0.0f;
 
-    // centroidsGPU should be in shared mem
-    int best_cluster = clustersGPU[frame_id];
-
-    float cost = 0;
-    for (int j = 0; j<N_frames; j++) {
-        if (best_cluster == clustersGPU[j]) {
-            // size_t idx = (size_t) N_frames * j + frame_id;
-            // cost += rmsd[idx];
-            // losing some coalescence since using triangular matrix
+        for (int jj = 0; jj < c_size; jj++) {
+            int j = sorted_frames[start + jj];
             cost += getRMSD_GPU(j, frame_id, rmsd, N_frames);
         }
+
+        // frameCosts is indexed by original frame_id, not sorted position
+        frameCosts[frame_id] = cost;
     }
-    frameCosts[frame_id] = cost;
 }
 
 __global__ 

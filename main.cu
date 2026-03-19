@@ -145,16 +145,12 @@ int main(int argc, char** args) {
             size_t stop_col  = std::min(start_col + NB_FRAMES_PER_CHUNK, N_frames);
             const size_t nb_tgt = stop_col - start_col;
 
-            std::cout << "\nIteration " << ++iter << "/" << RMSD_LOOPS_NEEDED
-                      << "  Row [" << start_row << "," << stop_row << ")"
-                      << "  Col [" << start_col << "," << stop_col << ")\n";
-
             // ── Extract targets chunk ─────────────────────────────────────────
             chrono_type t_extract_tgt = chrono_time::now();
             file.extractSnapshotsFastInPlace(start_col, stop_col, all_data, targets_coordinates);
             double ext_s = elapsed_s(t_extract_tgt);
             total_extract_s += ext_s;
-            print_throughput("Extract targets chunk", ext_s, nb_tgt);
+            // print_throughput("Extract targets chunk", ext_s, nb_tgt);
 
             CHECK_SUCCESS(cudaMemcpy(d_targets, targets_coordinates.data(),
                                      targets_coordinates.size() * sizeof(float),
@@ -177,7 +173,7 @@ int main(int argc, char** args) {
             total_kernel_s  += kern_s;
             total_rmsd_pairs += nb_ref * nb_tgt;
 
-            print_throughput("RMSD kernel (pairs/s)", kern_s, nb_ref * nb_tgt);
+            // print_throughput("RMSD kernel (pairs/s)", kern_s, nb_ref * nb_tgt);
 
             CHECK_SUCCESS(cudaMemcpy(rmsdHostChunk, d_rmsd, size_rmsd,
                                      cudaMemcpyDeviceToHost), "Copying RMSD chunk to CPU");
@@ -193,27 +189,6 @@ int main(int argc, char** args) {
                 }
             }
 
-            // ── Print bottom-right 5x5 corner of first tile ──────────────────
-            if (row == 0 && col == 0) {
-                size_t preview = 5;
-                size_t corner  = nb_ref - preview;
-                std::cout << "\n  Bottom-right 5x5 corner of tile (0,0)"
-                          << " [frames " << corner << ".." << (corner + preview - 1) << "]:\n";
-                std::cout << std::fixed << std::setprecision(4);
-                std::cout << std::setw(10) << "";
-                for (size_t j = 0; j < preview; ++j)
-                    std::cout << std::setw(10) << (corner + j);
-                std::cout << "\n";
-                for (size_t i = 0; i < preview; ++i) {
-                    std::cout << std::setw(10) << (corner + i);
-                    for (size_t j = 0; j < preview; ++j) {
-                        size_t chunk_idx = (corner + i) * nb_tgt + (corner + j);
-                        std::cout << std::setw(10) << rmsdHostChunk[chunk_idx];
-                    }
-                    std::cout << "\n";
-                }
-                std::cout << "\n";
-            }
         }
     }
 
@@ -236,25 +211,6 @@ int main(int argc, char** args) {
         for (size_t j = i + 1; j < N_frames; ++j)
             rmsdUpperTriangle[idx++] = rmsdHostAll[i * N_frames + j];
 
-    // ── Debug: 6x6 window centered on bottom-right corner of tile (0,0) ──────
-
-    size_t p = NB_FRAMES_PER_CHUNK;
-    std::cout << "\n  6x6 window around tile (0,0) corner (boundary at frame " << p << "):\n";
-    std::cout << std::fixed << std::setprecision(4);
-    std::cout << std::setw(10) << "";
-    for (size_t j = p - 3; j < p + 3; ++j) {
-        std::string lbl = (j == p ? ">" : "") + std::to_string(j);
-        std::cout << std::setw(10) << lbl;
-    }
-    std::cout << "\n";
-    for (size_t i = p - 3; i < p + 3; ++i) {
-        std::string lbl = (i == p ? ">" : "") + std::to_string(i);
-        std::cout << std::setw(10) << lbl;
-        for (size_t j = p - 3; j < p + 3; ++j)
-            std::cout << std::setw(10) << rmsdHostAll[i * N_frames + j];
-        std::cout << "\n";
-    }
-    std::cout << "  (> marks first frame of next tile)\n\n";
 
     delete[] rmsdHostAll;
 
@@ -272,7 +228,6 @@ int main(int argc, char** args) {
     std::cout << std::string(70, '=') << "\n";
 
     // ---------------- CLUSTERING GPU -----------------
-    print_vram_usage("RIGHT BEFORE CLUSTERING");
     chrono_type clustering_loop_start = chrono_time::now();
     float* d_rmsdUpperTriangle = nullptr;
     size_t tri_bytes = upper_triangle_size * sizeof(float);
@@ -295,7 +250,8 @@ int main(int argc, char** args) {
     float* frameCostsGPU;
     CHECK_SUCCESS(cudaMalloc(&frameCostsGPU, N_frames * sizeof(float)), "Allocating frameCostsGPU");
 
-    measure_seconds(clustering_loop_start, "==> Clustering memory setup");
+    const double mem_setup = elapsed_s(clustering_loop_start);
+    measure_seconds(clustering_loop_start, "===> Clustering memory setup");
 
     // Assignment step params
     dim3 clusteringThreads(1024);
@@ -306,8 +262,10 @@ int main(int argc, char** args) {
     dim3 reducingBlocks(K);
     size_t sharedMemSize = threadsPerClusterBlock.x * (sizeof(float) + sizeof(int));
 
-    print_vram_usage("DURING CLUSTERING");
+    double assignment_time = 0.0;
+    double medoid_cost_time = 0.0;
     for (int iter = 0; iter < MAX_ITER; iter++) {
+        chrono_type assignment_start = chrono_time::now();
         runKMedoidsGPU<<<clusteringBlocks, clusteringThreads>>>(
             N_frames,
             K,
@@ -318,20 +276,21 @@ int main(int argc, char** args) {
         );
         // Making sure all assignments are set across mutiliple blocks
         CHECK_SUCCESS(cudaDeviceSynchronize(), "runKMedoidsGPU sync");
+        assignment_time += elapsed_s(assignment_start);
+        chrono_type medoid_cost_start = chrono_time::now();
 
         computeMedoidCosts<<<clusteringBlocks, clusteringThreads>>>(
             N_frames,
             d_rmsdUpperTriangle,
-            centroidsGPU,
             clustersGPU,
             frameCostsGPU
         );
 
         CHECK_SUCCESS(cudaDeviceSynchronize(), "computeMedoidCosts sync");
+        medoid_cost_time += elapsed_s(medoid_cost_start);
 
         updateCentroidsGPU<<<K, threadsPerClusterBlock, sharedMemSize>>>(
             N_frames,
-            K,
             centroidsGPU,
             clustersGPU,
             frameCostsGPU
@@ -343,6 +302,9 @@ int main(int argc, char** args) {
     CHECK_SUCCESS(cudaMemcpy(clusters, clustersGPU, N_frames * sizeof(int), cudaMemcpyDeviceToHost), "Memcpy clustersGPU -> clusters");
 
     double clust_s = elapsed_s(clustering_loop_start);
+    std::cout << "===> Assignment time: " << assignment_time << '\n';
+    std::cout << "===> Medoid cost time: " << medoid_cost_time << '\n';
+    std::cout << "===> Update medoids time: " << clust_s - assignment_time - medoid_cost_time - mem_setup << '\n';
     print_throughput("Cluster assignments (frames/s)", clust_s, N_frames);
     measure_seconds(clustering_loop_start, "==> Clustering Total time");
 

@@ -280,30 +280,12 @@ void runKMedoidsGPU(
         }
     }
     clustersGPU[frame_id] = best_cluster;
-
-    // // Assignment completed for all frames
-    // __syncthreads();
-
-    // // Updating centroids
-    // float cost = 0;
-    // int member_count = 0;
-    // for (int j = 0; j<N_frames; j++) {
-    //     if (best_cluster == clustersGPU[j]) {
-    //         // size_t idx = (size_t) N_frames * j + frame_id;
-    //         // cost += rmsd[idx];
-    //         // losing some coalescence since using triangular matrix
-    //         cost += getRMSD_GPU(j, frame_id, rmsd, N_frames);
-    //         member_count += 1;
-    //     }
-    // }
-    // frameCosts[frame_id] = cost;
 }
 
 __global__ 
 void computeMedoidCosts(
     int N_frames,
     const float* __restrict__ rmsd,
-    int* centroidsGPU,
     int* clustersGPU,
     float* frameCosts
 )
@@ -333,7 +315,6 @@ void computeMedoidCosts(
 __global__ 
 void updateCentroidsGPU(
     int N_frames,
-    int K,
     int* centroidsGPU, 
     int* clustersGPU,
     float* frameCosts

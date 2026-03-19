@@ -59,7 +59,6 @@ __global__
 void computeMedoidCosts(
     int N_frames,
     const float* __restrict__ rmsd,
-    int* centroidsGPU,
     int* clustersGPU,
     float* frameCostsGPU
 );
@@ -67,7 +66,6 @@ void computeMedoidCosts(
 __global__ 
 void updateCentroidsGPU(
     int N_frames,
-    int K,
     int* centroidsGPU, 
     int* clustersGPU,
     float* frameCosts

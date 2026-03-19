@@ -11,10 +11,6 @@
 #include <iomanip>
 #include <cmath>
 
-// alias for the clock type
-using chrono_time = std::chrono::high_resolution_clock;
-using chrono_type = std::chrono::high_resolution_clock::time_point;
-
 // ============================================================================
 // UPPER TRIANGLE INDEXING HELPER (inline - can be in header)
 // ============================================================================
@@ -38,9 +34,6 @@ int sum_k(int k);
 int col_index_parcours(int i, int bound);
 void update_row_col(size_t idx, const size_t N_CHUNKS_PER_ROW, size_t& row, size_t& col);
 size_t get_chunk_frame_nb(size_t max_cap, size_t N_atoms, size_t N_dims);
-
-// Timing
-void measure_seconds(const chrono_type& start, const std::string& measurement);
 
 // K-medoids functions
 void pickRandomCentroids(int N_frames, int K, int* centroids);

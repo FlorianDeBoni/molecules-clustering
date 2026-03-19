@@ -92,12 +92,6 @@ size_t get_optimal_tile_size(size_t max_cap_MB, size_t N_atoms, size_t N_dims, s
     return static_cast<size_t>(std::floor(F_tile));
 }
 
-void measure_seconds(const chrono_type& start, const std::string& measurement) {
-    std::chrono::duration<float> elapsed = chrono_time::now()- start;
-    std::cout << std::left  << std::setw(30) << measurement << ": " 
-              << std::right << std::setw(10) << elapsed.count() << " s\n";
-}
-
 void pickKMedoidsPlusPlus(int N_snapshots, int K, const float* rmsd, int* centroids) {
     std::random_device rd;
     std::mt19937 gen(rd());

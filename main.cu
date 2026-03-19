@@ -82,20 +82,48 @@ int main(int argc, char** args)
     // chunk² could exceed GPU memory).  We now fail loudly if it's too large.
     CUDA_CHECK(cudaMalloc(&d_rmsd, NB_FRAMES_PER_CHUNK * NB_FRAMES_PER_CHUNK * sizeof(float)));
 
-    float *d_cx_ref, *d_cy_ref, *d_cz_ref, *d_G_ref;
-    float *d_cx_tgt, *d_cy_tgt, *d_cz_tgt, *d_G_tgt;
-    CUDA_CHECK(cudaMalloc(&d_cx_ref, NB_FRAMES_PER_CHUNK * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_cy_ref, NB_FRAMES_PER_CHUNK * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_cz_ref, NB_FRAMES_PER_CHUNK * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_G_ref,  NB_FRAMES_PER_CHUNK * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_cx_tgt, NB_FRAMES_PER_CHUNK * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_cy_tgt, NB_FRAMES_PER_CHUNK * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_cz_tgt, NB_FRAMES_PER_CHUNK * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&d_G_tgt,  NB_FRAMES_PER_CHUNK * sizeof(float)));
+    // [Optimization A] Centroid cache — one slot per chunk index.
+    // All centroids are precomputed once before the RMSD double loop.
+    // Each chunk c occupies a contiguous slice of NB_FRAMES_PER_CHUNK floats
+    // starting at c * NB_FRAMES_PER_CHUNK.
+    float *d_cx_cache, *d_cy_cache, *d_cz_cache, *d_G_cache;
+    size_t cache_slots = NB_ROW_ITERATIONS * NB_FRAMES_PER_CHUNK;
+    CUDA_CHECK(cudaMalloc(&d_cx_cache, cache_slots * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_cy_cache, cache_slots * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_cz_cache, cache_slots * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_G_cache,  cache_slots * sizeof(float)));
 
     dim3 threads(32, 8);
     size_t total_centroid_frames = 0;
     size_t total_rmsd_pairs      = 0;
+
+    // -----------------------------------------------------------------------
+    // Precompute centroids for every chunk once, before the RMSD double loop.
+    // -----------------------------------------------------------------------
+    timer.start("2. Computing RMSD");
+    timer.start("2.1. Computation centroids");
+    std::vector<float> chunk_coords;
+    for (size_t c = 0; c < NB_ROW_ITERATIONS; c++)
+    {
+        size_t start_c = c * NB_FRAMES_PER_CHUNK;
+        size_t stop_c  = std::min(start_c + NB_FRAMES_PER_CHUNK, N_frames);
+        size_t nb_c    = stop_c - start_c;
+
+        file.extractSnapshotsFastInPlace(start_c, stop_c, all_data, chunk_coords);
+        CUDA_CHECK(cudaMemcpy(d_references, chunk_coords.data(),
+                                chunk_coords.size() * sizeof(float),
+                                cudaMemcpyHostToDevice));
+
+        computeCentroidsG<<<(nb_c + 127) / 128, 128>>>(
+            d_references, N_atoms, nb_c,
+            d_cx_cache + c * NB_FRAMES_PER_CHUNK,
+            d_cy_cache + c * NB_FRAMES_PER_CHUNK,
+            d_cz_cache + c * NB_FRAMES_PER_CHUNK,
+            d_G_cache  + c * NB_FRAMES_PER_CHUNK);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        total_centroid_frames += nb_c;
+    }
+    timer.stop("2.1. Computation centroids");
 
     // -----------------------------------------------------------------------
     // Debug capture buffer: raw 2D window around the first chunk boundary.
@@ -110,7 +138,7 @@ int main(int argc, char** args)
     // -----------------------------------------------------------------------
     // RMSD computation
     // -----------------------------------------------------------------------
-    timer.start("2. Computing RMSD");
+    timer.start("2.2. Computation Global RMSD");
     for(size_t row = 0; row < NB_ROW_ITERATIONS; row++)
     {
         size_t start_row = row * NB_FRAMES_PER_CHUNK;
@@ -123,12 +151,6 @@ int main(int argc, char** args)
                               references_coordinates.size() * sizeof(float),
                               cudaMemcpyHostToDevice));
 
-        computeCentroidsG<<<(nb_ref + 127) / 128, 128>>>(
-            d_references, N_atoms, nb_ref,
-            d_cx_ref, d_cy_ref, d_cz_ref, d_G_ref);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        total_centroid_frames += nb_ref;
-
         for(size_t col = row; col < NB_ROW_ITERATIONS; col++)
         {
             size_t start_col = col * NB_FRAMES_PER_CHUNK;
@@ -140,12 +162,6 @@ int main(int argc, char** args)
                                   targets_coordinates.size() * sizeof(float),
                                   cudaMemcpyHostToDevice));
 
-            computeCentroidsG<<<(nb_tgt + 127) / 128, 128>>>(
-                d_targets, N_atoms, nb_tgt,
-                d_cx_tgt, d_cy_tgt, d_cz_tgt, d_G_tgt);
-            CUDA_CHECK(cudaDeviceSynchronize());
-            total_centroid_frames += nb_tgt;
-
             dim3 blocks((nb_tgt + threads.x - 1) / threads.x,
                         (nb_ref + threads.y - 1) / threads.y);
 
@@ -155,8 +171,14 @@ int main(int argc, char** args)
 
             RMSD<<<blocks, threads, smem_bytes>>>(
                 d_references, d_targets, N_atoms, nb_ref, nb_tgt,
-                d_cx_ref, d_cy_ref, d_cz_ref, d_G_ref,
-                d_cx_tgt, d_cy_tgt, d_cz_tgt, d_G_tgt,
+                d_cx_cache + row * NB_FRAMES_PER_CHUNK,
+                d_cy_cache + row * NB_FRAMES_PER_CHUNK,
+                d_cz_cache + row * NB_FRAMES_PER_CHUNK,
+                d_G_cache  + row * NB_FRAMES_PER_CHUNK,
+                d_cx_cache + col * NB_FRAMES_PER_CHUNK,
+                d_cy_cache + col * NB_FRAMES_PER_CHUNK,
+                d_cz_cache + col * NB_FRAMES_PER_CHUNK,
+                d_G_cache  + col * NB_FRAMES_PER_CHUNK,
                 d_rmsd);
             CUDA_CHECK(cudaDeviceSynchronize());
             total_rmsd_pairs += nb_ref * nb_tgt;
@@ -200,6 +222,7 @@ int main(int argc, char** args)
             }
         }
     }
+    timer.stop("2.2. Computation Global RMSD");
     timer.stop("2. Computing RMSD");
 
     // -----------------------------------------------------------------------
@@ -261,10 +284,8 @@ int main(int argc, char** args)
     CUDA_CHECK(cudaFree(d_references));
     CUDA_CHECK(cudaFree(d_targets));
     CUDA_CHECK(cudaFree(d_rmsd));
-    CUDA_CHECK(cudaFree(d_cx_ref)); CUDA_CHECK(cudaFree(d_cy_ref));
-    CUDA_CHECK(cudaFree(d_cz_ref)); CUDA_CHECK(cudaFree(d_G_ref));
-    CUDA_CHECK(cudaFree(d_cx_tgt)); CUDA_CHECK(cudaFree(d_cy_tgt));
-    CUDA_CHECK(cudaFree(d_cz_tgt)); CUDA_CHECK(cudaFree(d_G_tgt));
+    CUDA_CHECK(cudaFree(d_cx_cache)); CUDA_CHECK(cudaFree(d_cy_cache));
+    CUDA_CHECK(cudaFree(d_cz_cache)); CUDA_CHECK(cudaFree(d_G_cache));
 
     timer.print();
 

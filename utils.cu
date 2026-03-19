@@ -376,3 +376,18 @@ void saveClusters(const int* clusters, int N_frames, const int* centroids, int K
     out.close();
     std::cout << "✓ Cluster assignments saved to output/cluster_assignments.txt" << std::endl;
 }
+
+void saveArrayToFile(const char* filename, float* array, size_t size) {
+    std::ofstream file(filename);
+
+    if (!file) {
+        std::cerr << "Erreur lors de l'ouverture du fichier !" << std::endl;
+        return;
+    }
+
+    for (size_t i = 0; i < size; ++i) {
+        file << array[i] << "\n";
+    }
+
+    file.close();
+}

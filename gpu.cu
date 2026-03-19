@@ -200,3 +200,107 @@ void RMSD(const float* __restrict__ refs,
     float rmsd2 = (G_ref[r] + G_tgt[t] - 2.f * sigma_sum) / N_atoms;
     rmsd[r * N_tgt + t] = sqrtf(fmaxf(rmsd2, 0.f));
 }
+
+
+
+
+__global__
+void RMSD_diagonal(const float* __restrict__ refs,
+          size_t N_atoms,
+          size_t N_ref,
+          const float* __restrict__ cx_ref,
+          const float* __restrict__ cy_ref,
+          const float* __restrict__ cz_ref,
+          const float* __restrict__ G_ref,
+          float* __restrict__ rmsd)
+{
+    extern __shared__ float smem[];
+
+    // TILE must equal blockDim.x so that each tx-lane loads exactly one atom
+    // per tile into shared memory.  The caller allocates smem accordingly:
+    //   smem_bytes = 3 * blockDim.x * blockDim.y * sizeof(float)
+    const int TILE = blockDim.x;   // = 32
+    const int TILE_y = blockDim.y;
+
+    float* s_ref_x = smem;
+    float* s_ref_y = s_ref_x + TILE * blockDim.y;
+    float* s_ref_z = s_ref_y + TILE * blockDim.y;
+
+    int r = blockIdx.y * blockDim.y + threadIdx.y;   // ref frame index
+    int t = blockIdx.x * blockDim.x + threadIdx.x;   // tgt frame index
+
+    if (r >= N_ref || t >= N_ref) return;
+    if (TILE * (blockIdx.x + 1) < TILE_y * blockIdx.y) return;
+
+
+    // if (t_max < r_min) return;
+
+    // bool compute = (t >= r);
+    // compute = compute && (!(r >= N_ref || t >= N_ref));
+
+    float rcx = cx_ref[r],  rcy = cy_ref[r],  rcz = cz_ref[r];
+    float scx = cx_ref[t],  scy = cy_ref[t],  scz = cz_ref[t];
+
+    float a00=0,a01=0,a02=0;
+    float a10=0,a11=0,a12=0;
+    float a20=0,a21=0,a22=0;
+
+    for (int start = 0; start < N_atoms; start += TILE)
+    {
+        int atom_idx = start + threadIdx.x;
+
+        // Thread (tx, ty) loads ref atom (start+tx) for ref frame r(ty)
+        // into shared memory slot [tx * blockDim.y + ty].
+        if (atom_idx < N_atoms)
+        {
+            s_ref_x[threadIdx.x * blockDim.y + threadIdx.y] =
+                refs[0 * N_atoms * N_ref + atom_idx * N_ref + r] - rcx;
+            s_ref_y[threadIdx.x * blockDim.y + threadIdx.y] =
+                refs[1 * N_atoms * N_ref + atom_idx * N_ref + r] - rcy;
+            s_ref_z[threadIdx.x * blockDim.y + threadIdx.y] =
+                refs[2 * N_atoms * N_ref + atom_idx * N_ref + r] - rcz;
+        }
+
+        __syncthreads();
+
+        int tile_end = min(TILE, (int)(N_atoms - start));
+        for (int k = 0; k < tile_end; ++k)
+        {
+            // Ref atom (start+k) for this thread's ref frame: from shared mem.
+            float rx = s_ref_x[k * blockDim.y + threadIdx.y];
+            float ry = s_ref_y[k * blockDim.y + threadIdx.y];
+            float rz = s_ref_z[k * blockDim.y + threadIdx.y];
+
+            // Tgt atom (start+k) for this thread's tgt frame: global read.
+            // All blockDim.y threads with the same tx share the same address
+            // and hit L1 cache.
+            int atom_k = start + k;
+            float sx = refs[0 * N_atoms * N_ref + atom_k * N_ref + t] - scx;
+            float sy = refs[1 * N_atoms * N_ref + atom_k * N_ref + t] - scy;
+            float sz = refs[2 * N_atoms * N_ref + atom_k * N_ref + t] - scz;
+
+            a00 += rx*sx;  a01 += rx*sy;  a02 += rx*sz;
+            a10 += ry*sx;  a11 += ry*sy;  a12 += ry*sz;
+            a20 += rz*sx;  a21 += rz*sy;  a22 += rz*sz;
+        }
+
+        __syncthreads();
+    }
+
+    // Symmetric matrix M = Aᵀ·A  (3×3, upper triangle sufficient)
+    float m00 = a00*a00 + a10*a10 + a20*a20;
+    float m01 = a00*a01 + a10*a11 + a20*a21;
+    float m02 = a00*a02 + a10*a12 + a20*a22;
+    float m11 = a01*a01 + a11*a11 + a21*a21;
+    float m12 = a01*a02 + a11*a12 + a21*a22;
+    float m22 = a02*a02 + a12*a12 + a22*a22;
+    float lambda[3];
+    compute_eigenvalues_symmetric_3x3(m00, m01, m02, m11, m12, m22, lambda);
+    float sigma_sum = sqrtf(fmaxf(lambda[0], 0.f))
+                    + sqrtf(fmaxf(lambda[1], 0.f))
+                    + sqrtf(fmaxf(lambda[2], 0.f));
+    float rmsd2 = (G_ref[r] + G_ref[t] - 2.f * sigma_sum) / N_atoms;
+    rmsd2 = sqrtf(fmaxf(rmsd2, 0.f));
+    // rmsd[r * N_ref + t] = sqrtf(fmaxf(rmsd2, 0.f));
+    rmsd[r * N_ref + t] = rmsd2;
+}

@@ -52,3 +52,6 @@ float runKMedoids(int N_frames, int K, const float* rmsd, int MAX_ITER, int* cen
 float runRandomClustering(int N_frames, int K, const float* rmsd);
 float k_analysis(float* rmsd, size_t N_frames, int MAX_ITER, int K_MIN = 2, int K_MAX = 50);
 void saveClusters(const int* clusters, int N_frames, const int* centroids, int K);
+
+
+void saveArrayToFile(const char* filename, float* array, size_t size);

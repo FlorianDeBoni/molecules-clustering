@@ -20,7 +20,7 @@ CUDA_LIBS = -lcudart
 
 # Source files
 CC_SOURCES = FileUtils.cpp
-CUDA_SOURCES = main.cu gpu.cu
+CUDA_SOURCES = main.cu gpu.cu utils.cu
 
 # Chemfiles lib
 CHEMFILES_GIT = https://github.com/chemfiles/chemfiles
@@ -50,8 +50,8 @@ all: $(CHEMFILES_BUILD_DIR)/libchemfiles.a $(EXECNAME)
 	@./$(EXECNAME) $(BIN_FILE)
 
 # Header dependecies
-$(OBJECT_DIR)/main.o: utils.h FileUtils.h
-$(OBJECT_DIR)/utils.o: utils.h FileUtils.h
+$(OBJECT_DIR)/main.o: utils.cuh FileUtils.hpp
+$(OBJECT_DIR)/utils.o: utils.cuh FileUtils.hpp
 
 # C++ Compilation Rule
 $(OBJECT_DIR)/%.o: %.cpp

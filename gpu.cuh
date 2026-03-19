@@ -53,4 +53,14 @@ void RMSD(const float* __restrict__ refs,
           const float* __restrict__ G_tgt,
           float* __restrict__ rmsd);
 
+__global__
+void RMSD_diagonal(const float* __restrict__ refs,
+          size_t N_atoms,
+          size_t N_ref,
+          const float* __restrict__ cx_ref,
+          const float* __restrict__ cy_ref,
+          const float* __restrict__ cz_ref,
+          const float* __restrict__ G_ref,
+          float* __restrict__ rmsd);
+
 #endif // GPU_CUH

@@ -40,7 +40,7 @@ int main(int argc, char** args)
     }
 
     FileUtils file(args[1]);
-    size_t N_frames = 90000;
+    size_t N_frames = 30000;
     size_t N_atoms  = file.getN_atoms();
     size_t N_dims   = file.getN_dims();
 
@@ -108,7 +108,7 @@ int main(int argc, char** args)
     // Debug capture buffer: raw 2D window around the first chunk boundary.
     // Initialised to -1 so unwritten cells are visible in the printout.
     // -----------------------------------------------------------------------
-    const size_t window    = 5;
+    const size_t window = 5;
     const size_t dbg_start = NB_FRAMES_PER_CHUNK - window;
     const size_t dbg_end   = NB_FRAMES_PER_CHUNK + window;  // exclusive
     const size_t dbg_size  = 2 * window;
@@ -146,19 +146,6 @@ int main(int argc, char** args)
             size_t stop_col  = std::min(start_col + NB_FRAMES_PER_CHUNK, N_frames);
             size_t nb_tgt    = stop_col - start_col;
 
-            file.extractSnapshotsFastInPlace(start_col, stop_col, all_data, targets_coordinates);
-            CUDA_CHECK(cudaMemcpy(d_targets, targets_coordinates.data(),
-                                  targets_coordinates.size() * sizeof(float),
-                                  cudaMemcpyHostToDevice));
-
-            auto c2 = chrono_time::now();
-            computeCentroidsG<<<(nb_tgt + 127) / 128, 128>>>(
-                d_targets, N_atoms, nb_tgt,
-                d_cx_tgt, d_cy_tgt, d_cz_tgt, d_G_tgt);
-            CUDA_CHECK(cudaDeviceSynchronize());
-            centroid_time += elapsed_s(c2);
-            total_centroid_frames += nb_tgt;
-
             dim3 blocks((nb_tgt + threads.x - 1) / threads.x,
                         (nb_ref + threads.y - 1) / threads.y);
 
@@ -166,15 +153,40 @@ int main(int argc, char** args)
             const int TILE      = threads.x;
             size_t smem_bytes   = 3 * TILE * threads.y * sizeof(float);
 
-            auto k0 = chrono_time::now();
-            RMSD<<<blocks, threads, smem_bytes>>>(
-                d_references, d_targets, N_atoms, nb_ref, nb_tgt,
-                d_cx_ref, d_cy_ref, d_cz_ref, d_G_ref,
-                d_cx_tgt, d_cy_tgt, d_cz_tgt, d_G_tgt,
-                d_rmsd);
-            CUDA_CHECK(cudaDeviceSynchronize());
-            rmsd_time += elapsed_s(k0);
-            total_rmsd_pairs += nb_ref * nb_tgt;
+            if (row == col) {
+                auto k0 = chrono_time::now();
+                RMSD_diagonal<<<blocks, threads, smem_bytes>>>(
+                    d_references, N_atoms, nb_ref,
+                    d_cx_ref, d_cy_ref, d_cz_ref, d_G_ref,
+                    d_rmsd);
+                CUDA_CHECK(cudaDeviceSynchronize());
+                rmsd_time += elapsed_s(k0);
+                total_rmsd_pairs += nb_ref * nb_tgt;
+            }
+            else {
+                file.extractSnapshotsFastInPlace(start_col, stop_col, all_data, targets_coordinates);
+                CUDA_CHECK(cudaMemcpy(d_targets, targets_coordinates.data(),
+                                    targets_coordinates.size() * sizeof(float),
+                                    cudaMemcpyHostToDevice));
+
+                auto c2 = chrono_time::now();
+                computeCentroidsG<<<(nb_tgt + 127) / 128, 128>>>(
+                    d_targets, N_atoms, nb_tgt,
+                    d_cx_tgt, d_cy_tgt, d_cz_tgt, d_G_tgt);
+                CUDA_CHECK(cudaDeviceSynchronize());
+                centroid_time += elapsed_s(c2);
+                total_centroid_frames += nb_tgt;
+                
+                auto k0 = chrono_time::now();
+                RMSD<<<blocks, threads, smem_bytes>>>(
+                    d_references, d_targets, N_atoms, nb_ref, nb_tgt,
+                    d_cx_ref, d_cy_ref, d_cz_ref, d_G_ref,
+                    d_cx_tgt, d_cy_tgt, d_cz_tgt, d_G_tgt,
+                    d_rmsd);
+                CUDA_CHECK(cudaDeviceSynchronize());
+                rmsd_time += elapsed_s(k0);
+                total_rmsd_pairs += nb_ref * nb_tgt;
+            }
 
             // Copy only the nb_ref × nb_tgt result actually written by the kernel.
             CUDA_CHECK(cudaMemcpy(rmsdHostChunk, d_rmsd,
@@ -228,6 +240,8 @@ int main(int argc, char** args)
               << " RMSD/s (" << rmsd_time << " s)\n";
     std::cout << "Full pipeline    : " << total_rmsd_pairs / pipeline_time
               << " RMSD/s (" << pipeline_time << " s)\n";
+    
+    // saveArrayToFile("output/RMSD_centroid.txt", rmsdUpperTriangle, upper_triangle_size);
 
     // -----------------------------------------------------------------------
     // DEBUG: inspect RMSD around chunk boundary (raw, no symmetry)

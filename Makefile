@@ -45,7 +45,7 @@ all: $(CHEMFILES_BUILD_DIR)/libchemfiles.a $(EXECNAME)
 	@./$(EXECNAME) $(BIN_FILE)
 
 # Header dependecies
-$(OBJECT_DIR)/main.o: main.cu utils.cuh gpu.cuh FileUtils.hpp
+$(OBJECT_DIR)/main.o: main.cu utils.cuh gpu.cuh FileUtils.hpp CudaTimer.cuh
 $(OBJECT_DIR)/gpu.o: gpu.cu utils.cuh gpu.cuh
 $(OBJECT_DIR)/utils.o: utils.cu utils.cuh FileUtils.hpp
 $(OBJECT_DIR)/FileUtils.o: FileUtils.cpp FileUtils.hpp

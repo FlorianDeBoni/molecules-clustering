@@ -200,3 +200,117 @@ void RMSD(const float* __restrict__ refs,
     float rmsd2 = (G_ref[r] + G_tgt[t] - 2.f * sigma_sum) / N_atoms;
     rmsd[r * N_tgt + t] = __fsqrt_rn(fmaxf(rmsd2, 0.f));
 }
+
+__global__
+void AssignClusters(
+    int N_frames,
+    int K,
+    const float* __restrict__ rmsd,
+    int* centroidsGPU,
+    int* clustersGPU,
+    float* frameCosts
+)
+{
+    // Assigning each frame to a cluster
+    int frame_id = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (frame_id >= N_frames) {
+        return;
+    }
+
+    int best_cluster = 0;
+    float best_d = HUGE_VALF;
+    for (int k = 0; k<K; k++) {
+        // size_t distance_idx = (size_t) N_frames * centroidsGPU[k] + frame_id;
+        // float curr_distance = rmsd[distance_idx];
+        float curr_distance = getRMSD_GPU(centroidsGPU[k], frame_id, rmsd, N_frames);
+        if (curr_distance < best_d) {
+            best_cluster = k;
+            best_d = curr_distance;
+        }
+    }
+    clustersGPU[frame_id] = best_cluster;
+}
+
+__global__
+void ComputeMedoidCosts(
+    int N_frames,
+    const float* __restrict__ rmsd,
+    int* clustersGPU,
+    float* frameCosts
+)
+{
+    int frame_id = blockDim.x * blockIdx.x + threadIdx.x;
+
+    if (frame_id >= N_frames) {
+        return;
+    }
+
+    int assigned_cluster = clustersGPU[frame_id];
+
+    float cost = 0;
+    for (int j = 0; j<N_frames; j++) {
+        if (assigned_cluster == clustersGPU[j]) {
+            // size_t idx = (size_t) N_frames * j + frame_id;
+            // cost += rmsd[idx];
+            // losing some coalescence since using triangular matrix
+            cost += getRMSD_GPU(j, frame_id, rmsd, N_frames);
+        }
+    }
+    frameCosts[frame_id] = cost;
+}
+
+
+__global__
+void UpdateMedoids(
+    int N_frames,
+    int* centroidsGPU,
+    int* clustersGPU,
+    float* frameCosts
+)
+{
+    int k = blockIdx.x;
+    int tid = threadIdx.x;
+
+    // Shared mem : [costs | indices]
+    extern __shared__ float smem[];
+    int* s_indices = (int*)&smem[blockDim.x];
+
+
+    // Calcul des minima locaux pour chaque thread
+    float local_min_cost = HUGE_VALF;
+    int local_min_idx = -1;
+
+    for (int i = tid; i < N_frames; i += blockDim.x) {
+        if (clustersGPU[i] == k) {
+            // parcours divergent coalescence pas sûre
+            float cost = frameCosts[i];
+            if (cost < local_min_cost) {
+                local_min_cost = cost;
+                local_min_idx = i;
+            }
+        }
+    }
+
+    // Store to shared memory
+    smem[tid] = local_min_cost;
+    s_indices[tid] = local_min_idx;
+    __syncthreads();
+
+    // Reduction in shared memory
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            if (smem[tid + stride] < smem[tid]) {
+                smem[tid] = smem[tid + stride];
+                s_indices[tid] = s_indices[tid + stride];
+            }
+        }
+        __syncthreads();
+    }
+
+    // Thread 0 updates the centroid
+    if (tid == 0) {
+        centroidsGPU[k] = s_indices[0];
+    }
+}
+

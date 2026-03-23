@@ -260,14 +260,87 @@ int main(int argc, char** args)
     // -----------------------------------------------------------------------
     // K-Medoids clustering  (rmsdUpperTriangle already in packed format)
     // -----------------------------------------------------------------------
+    timer.start("3. Computing Clusters");
+    timer.start("3.1. Clustering setup");
     int K        = 10;
     int MAX_ITER = 50;
-    int* centroids = new int[K];
-    int* clusters  = new int[N_frames];
 
-    timer.start("3. Computing Clusters");
-    float db_index = runKMedoids(N_frames, K, rmsdUpperTriangle, MAX_ITER, centroids, clusters);
+
+    // Allocating GPU arrays
+    int* centroids = new int[K];
+    int* d_centroids;
+    CUDA_CHECK(cudaMalloc(&d_centroids, K * sizeof(int)));
+
+    int* clusters  = new int[N_frames];
+    int* d_clusters;
+    CUDA_CHECK(cudaMalloc(&d_clusters, N_frames * sizeof(int)));
+
+    float* d_rmsdUpperTriangle = nullptr;
+    size_t tri_bytes = upper_triangle_size * sizeof(float);
+    CUDA_CHECK(cudaMalloc(&d_rmsdUpperTriangle, tri_bytes));
+    CUDA_CHECK(cudaMemcpy(d_rmsdUpperTriangle, rmsdUpperTriangle, tri_bytes,
+                cudaMemcpyHostToDevice));
+    
+    float* d_frame_costs;
+    CUDA_CHECK(cudaMalloc(&d_frame_costs, N_frames * sizeof(float)));
+
+
+    // Pick first K unique indices
+    pickKMedoidsPlusPlus(N_frames, K, rmsdUpperTriangle, centroids);
+    CUDA_CHECK(cudaMemcpy(d_centroids, centroids, K*sizeof(int), cudaMemcpyHostToDevice));
+
+    timer.stop("3.1. Clustering setup");
+
+
+    // Assignment step params
+    dim3 clusteringThreads(1024);
+    dim3 clusteringBlocks((N_frames + clusteringThreads.x - 1) / clusteringThreads.x);
+    // Centroids update step params
+    dim3 threadsPerClusterBlock(1024);
+    dim3 reducingBlocks(K);
+    size_t sharedMemSize = threadsPerClusterBlock.x * (sizeof(float) + sizeof(int));
+
+    for (int iter = 0; iter < MAX_ITER; iter++) {
+        AssignClusters<<<clusteringBlocks, clusteringThreads>>>(
+            N_frames,
+            K,
+            d_rmsdUpperTriangle,
+            d_centroids,
+            d_clusters,
+            d_frame_costs
+        );
+        // Making sure all assignments are set across mutiliple blocks
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        ComputeMedoidCosts<<<clusteringBlocks, clusteringThreads>>>(
+            N_frames,
+            d_rmsdUpperTriangle,
+            d_clusters,
+            d_frame_costs
+        );
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        UpdateMedoids<<<K, threadsPerClusterBlock, sharedMemSize>>>(
+            N_frames,
+            d_centroids,
+            d_clusters,
+            d_frame_costs
+        );
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Copying results back
+    CUDA_CHECK(cudaMemcpy(centroids, d_centroids, K * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(clusters, d_clusters, N_frames * sizeof(int), cudaMemcpyDeviceToHost));
+
     timer.stop("3. Computing Clusters");
+
+
+    // -----------------------------------------------------------------------
+    // Final Clustering Results:
+    // -----------------------------------------------------------------------
+    float db_index = daviesBouldinIndex(N_frames, K, clusters, centroids, rmsdUpperTriangle);
+
 
     std::cout << "\n===== K-MEDOIDS =====\n";
     std::cout << "Davies-Bouldin index : " << db_index << "\n";
@@ -281,6 +354,10 @@ int main(int argc, char** args)
     // -----------------------------------------------------------------------
     // Cleanup
     // -----------------------------------------------------------------------
+    CUDA_CHECK(cudaFree(d_rmsdUpperTriangle));
+    CUDA_CHECK(cudaFree(d_centroids));
+    CUDA_CHECK(cudaFree(d_clusters));
+    CUDA_CHECK(cudaFree(d_frame_costs));
     CUDA_CHECK(cudaFree(d_references));
     CUDA_CHECK(cudaFree(d_targets));
     CUDA_CHECK(cudaFree(d_rmsd));

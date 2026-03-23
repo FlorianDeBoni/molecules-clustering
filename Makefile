@@ -20,7 +20,7 @@ CUDA_LIBS = -lcudart
 
 # Source files
 CC_SOURCES = FileUtils.cpp
-CUDA_SOURCES = main.cu gpu.cu
+CUDA_SOURCES = main.cu gpu.cu utils.cu
 
 # Chemfiles lib
 CHEMFILES_GIT = https://github.com/chemfiles/chemfiles
@@ -30,28 +30,25 @@ BIN_DIR = output
 
 
 # Object Lists
+OBJECT_DIR = objects
 CC_OBJECTS = $(patsubst %.cpp,$(OBJECT_DIR)/%.o,$(CC_SOURCES))
 CUDA_OBJECTS = $(patsubst %.cu,$(OBJECT_DIR)/%.o,$(CUDA_SOURCES))
-OBJECT_DIR = objects
 
 EXECNAME = main
 
-# Argument variable for different dataset processing
-DATASET ?= 0
-ifeq ($(DATASET),0)
-    DATASET_READER = md_reader_legacy.cpp
-    BIN_FILE = $(BIN_DIR)/snapshots_coords_0.bin
-else
-    DATASET_READER = md_reader.cpp
-    BIN_FILE = $(BIN_DIR)/snapshots_coords_1.bin
-endif
+# For modularity, data prep is seperate 
+# Currently using the 200k dataset & saving a bin file
+DATASET_READER = md_reader.cpp
+BIN_FILE = $(BIN_DIR)/snapshots_coords_all.bin
 
 all: $(CHEMFILES_BUILD_DIR)/libchemfiles.a $(EXECNAME)
 	@./$(EXECNAME) $(BIN_FILE)
 
 # Header dependecies
-$(OBJECT_DIR)/main.o: utils.h FileUtils.h
-$(OBJECT_DIR)/utils.o: utils.h FileUtils.h
+$(OBJECT_DIR)/main.o: main.cu utils.cuh gpu.cuh FileUtils.hpp
+$(OBJECT_DIR)/gpu.o: gpu.cu utils.cuh gpu.cuh
+$(OBJECT_DIR)/utils.o: utils.cu utils.cuh FileUtils.hpp
+$(OBJECT_DIR)/FileUtils.o: FileUtils.cpp FileUtils.hpp
 
 # C++ Compilation Rule
 $(OBJECT_DIR)/%.o: %.cpp
@@ -60,7 +57,7 @@ $(OBJECT_DIR)/%.o: %.cpp
 
 # Linking Rule
 $(EXECNAME): $(CC_OBJECTS) $(CUDA_OBJECTS) $(BIN_FILE)
-	@$(CPUCC) -o $(EXECNAME) -g -O0 $(CC_OBJECTS) $(CUDA_OBJECTS) $(CC_LDFLAGS) $(CUDA_LDFLAGS) $(CUDA_LIBS)
+	@$(GPUCC) -o $(EXECNAME) -g -O0 $(CC_OBJECTS) $(CUDA_OBJECTS) $(CC_LDFLAGS) $(CUDA_LDFLAGS) $(CUDA_LIBS)
 
 
 # GPU Compilation Rule

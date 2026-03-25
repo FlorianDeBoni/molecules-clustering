@@ -138,8 +138,8 @@ int main()
 {
     try
     {
-        std::string dataset_root = "./datasets/dataset2";
-        std::string output_file = "output/snapshots_coords_all_2.bin";
+        std::string dataset_root = "./datasets/dataset3";
+        std::string output_file = "output/snapshots_coords_all_3.bin";
 
         fs::create_directories(fs::path(output_file).parent_path());
 

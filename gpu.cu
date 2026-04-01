@@ -205,56 +205,49 @@ __global__
 void AssignClusters(
     int N_frames,
     int K,
-    const float* __restrict__ rmsd,
-    int* centroidsGPU,
-    int* clustersGPU,
-    float* frameCosts
-)
-{
-    // Assigning each frame to a cluster
+    const float* __restrict__ centroid_rows,  // [K x N_frames], dense
+    int* clustersGPU
+) {
     int frame_id = blockDim.x * blockIdx.x + threadIdx.x;
+    if (frame_id >= N_frames) return;
 
-    if (frame_id >= N_frames) {
-        return;
-    }
+    int   best_cluster = 0;
+    float best_d       = HUGE_VALF;
 
-    int best_cluster = 0;
-    float best_d = HUGE_VALF;
-    for (int k = 0; k<K; k++) {
-        // size_t distance_idx = (size_t) N_frames * centroidsGPU[k] + frame_id;
-        // float curr_distance = rmsd[distance_idx];
-        float curr_distance = getRMSD_GPU(centroidsGPU[k], frame_id, rmsd, N_frames);
-        if (curr_distance < best_d) {
+    for (int k = 0; k < K; k++) {
+        // Coalesced: all threads read consecutive frame_ids in same row k
+        float d = centroid_rows[(size_t)k * N_frames + frame_id];
+        if (d < best_d) {
+            best_d       = d;
             best_cluster = k;
-            best_d = curr_distance;
         }
     }
     clustersGPU[frame_id] = best_cluster;
 }
 
+// ComputeMedoidCosts_Chunk: accumulates cost over one dense chunk of rows
+// Call once per chunk; reset=true on first chunk to zero frameCosts
 __global__
-void ComputeMedoidCosts(
+void ComputeMedoidCosts_Chunk(
     int N_frames,
-    const float* __restrict__ rmsd,
-    int* clustersGPU,
-    float* frameCosts
-)
-{
+    int chunk_start,
+    int chunk_size,
+    const float* __restrict__ rmsd_chunk,  // [chunk_size x N_frames], dense
+    const int*   clustersGPU,
+    float*       frameCosts,
+    bool         reset
+) {
     int frame_id = blockDim.x * blockIdx.x + threadIdx.x;
+    if (frame_id >= N_frames) return;
 
-    if (frame_id >= N_frames) {
-        return;
-    }
+    int   assigned_cluster = clustersGPU[frame_id];
+    float cost             = reset ? 0.0f : frameCosts[frame_id];
 
-    int assigned_cluster = clustersGPU[frame_id];
-
-    float cost = 0;
-    for (int j = 0; j<N_frames; j++) {
-        if (assigned_cluster == clustersGPU[j]) {
-            // size_t idx = (size_t) N_frames * j + frame_id;
-            // cost += rmsd[idx];
-            // losing some coalescence since using triangular matrix
-            cost += getRMSD_GPU(j, frame_id, rmsd, N_frames);
+    for (int local_j = 0; local_j < chunk_size; local_j++) {
+        int j = chunk_start + local_j;
+        if (clustersGPU[j] == assigned_cluster) {
+            // Coalesced: consecutive frame_ids → consecutive addresses
+            cost += rmsd_chunk[(size_t)local_j * N_frames + frame_id];
         }
     }
     frameCosts[frame_id] = cost;

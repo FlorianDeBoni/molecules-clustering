@@ -370,3 +370,63 @@ void saveClusters(const int* clusters, int N_frames, const int* centroids, int K
     out.close();
     std::cout << "✓ Cluster assignments saved to output/cluster_assignments.txt" << std::endl;
 }
+
+// Cluster chunking
+// Centroid rows: K dense rows of length N
+// d_centroid_rows must be pre-allocated: K * N * sizeof(float)
+void uploadCentroidRows(
+    int N_frames,
+    int K,
+    const float* __restrict__ rmsdUpperTriangle,  // host, packed triangular
+    const int*   centroids,                        // host, length K
+    float*       d_centroid_rows,                  // device, K * N
+    cudaStream_t stream = 0
+) {
+    // Temporary host buffer (pinned would be faster if called repeatedly)
+    std::vector<float> row_buffer(N_frames);
+
+    for (int k = 0; k < K; k++) {
+        int c = centroids[k];
+        // Unpack row c of the triangular matrix into a dense row
+        for (int j = 0; j < N_frames; j++) {
+            row_buffer[j] = (c == j) ? 0.0f : getRMSD(c, j, rmsdUpperTriangle, N_frames);
+        }
+        size_t dst_offset = (size_t)k * N_frames;
+        cudaMemcpyAsync(
+            d_centroid_rows + dst_offset,
+            row_buffer.data(),
+            N_frames * sizeof(float),
+            cudaMemcpyHostToDevice,
+            stream
+        );
+    }
+}
+
+// Dense chunk: rows [chunk_start, chunk_start + chunk_size)
+// Unpacked into row-major dense layout [chunk_size x N_frames]
+// d_chunk must be pre-allocated: chunk_size * N_frames * sizeof(float)
+void uploadChunk(
+    int N_frames,
+    int chunk_start,
+    int chunk_size,
+    const float* __restrict__ rmsdUpperTriangle,  // host, packed triangular
+    float*       d_chunk,                          // device, chunk_size * N_frames
+    float*       h_chunk_pinned,                   // host pinned staging buffer
+    cudaStream_t stream = 0
+) {
+    // Unpack chunk rows into pinned staging buffer (dense row-major)
+    for (int local_r = 0; local_r < chunk_size; local_r++) {
+        int r = chunk_start + local_r;
+        float* dst_row = h_chunk_pinned + (size_t)local_r * N_frames;
+        for (int j = 0; j < N_frames; j++) {
+            dst_row[j] = (r == j) ? 0.0f : getRMSD(r, j, rmsdUpperTriangle, N_frames);
+        }
+    }
+    cudaMemcpyAsync(
+        d_chunk,
+        h_chunk_pinned,
+        (size_t)chunk_size * N_frames * sizeof(float),
+        cudaMemcpyHostToDevice,
+        stream
+    );
+}

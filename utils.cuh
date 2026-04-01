@@ -34,6 +34,23 @@ int sum_k(int k);
 int col_index_parcours(int i, int bound);
 void update_row_col(size_t idx, const size_t N_CHUNKS_PER_ROW, size_t& row, size_t& col);
 size_t get_chunk_frame_nb(size_t max_cap, size_t N_atoms, size_t N_dims);
+void uploadCentroidRows(
+    int N_frames,
+    int K,
+    const float* __restrict__ rmsdUpperTriangle,  // host, packed triangular
+    const int*   centroids,                        // host, length K
+    float*       d_centroid_rows,                  // device, K * N
+    cudaStream_t stream = 0
+);
+void uploadChunk(
+    int N_frames,
+    int chunk_start,
+    int chunk_size,
+    const float* __restrict__ rmsdUpperTriangle,  // host, packed triangular
+    float*       d_chunk,                          // device, chunk_size * N_frames
+    float*       h_chunk_pinned,                   // host pinned staging buffer
+    cudaStream_t stream = 0
+);
 
 // K-medoids functions
 void pickRandomCentroids(int N_frames, int K, int* centroids);

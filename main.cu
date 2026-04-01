@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <cmath>
 #include <cuda_runtime.h>
+#include <algorithm>
 
 // ---------------------------------------------------------------------------
 // CUDA error-checking macro
@@ -275,14 +276,23 @@ int main(int argc, char** args)
     int* d_clusters;
     CUDA_CHECK(cudaMalloc(&d_clusters, N_frames * sizeof(int)));
 
-    float* d_rmsdUpperTriangle = nullptr;
-    size_t tri_bytes = upper_triangle_size * sizeof(float);
-    CUDA_CHECK(cudaMalloc(&d_rmsdUpperTriangle, tri_bytes));
-    CUDA_CHECK(cudaMemcpy(d_rmsdUpperTriangle, rmsdUpperTriangle, tri_bytes,
-                cudaMemcpyHostToDevice));
-    
+    const int CHUNK_SIZE = 1024; // tune to fit VRAM: CHUNK_SIZE * N_frames * 4 bytes
+
+    float* d_centroid_rows;
+    CUDA_CHECK(cudaMalloc(&d_centroid_rows, (size_t)K * N_frames * sizeof(float)));
+
+    float* d_chunk;
+    CUDA_CHECK(cudaMalloc(&d_chunk, (size_t)CHUNK_SIZE * N_frames * sizeof(float)));
+
+    float* h_chunk_pinned;
+    CUDA_CHECK(cudaMallocHost(&h_chunk_pinned, (size_t)CHUNK_SIZE * N_frames * sizeof(float)));
+
     float* d_frame_costs;
     CUDA_CHECK(cudaMalloc(&d_frame_costs, N_frames * sizeof(float)));
+
+    cudaStream_t compute_stream, transfer_stream;
+    CUDA_CHECK(cudaStreamCreate(&compute_stream));
+    CUDA_CHECK(cudaStreamCreate(&transfer_stream));
 
 
     // Pick first K unique indices
@@ -301,33 +311,59 @@ int main(int argc, char** args)
     size_t sharedMemSize = threadsPerClusterBlock.x * (sizeof(float) + sizeof(int));
 
     for (int iter = 0; iter < MAX_ITER; iter++) {
-        AssignClusters<<<clusteringBlocks, clusteringThreads>>>(
-            N_frames,
-            K,
-            d_rmsdUpperTriangle,
-            d_centroids,
-            d_clusters,
-            d_frame_costs
-        );
-        // Making sure all assignments are set across mutiliple blocks
-        CUDA_CHECK(cudaDeviceSynchronize());
 
-        ComputeMedoidCosts<<<clusteringBlocks, clusteringThreads>>>(
-            N_frames,
-            d_rmsdUpperTriangle,
-            d_clusters,
-            d_frame_costs
-        );
-        CUDA_CHECK(cudaDeviceSynchronize());
+        // 1. Upload K centroid rows (small, sync is fine)
+        uploadCentroidRows(N_frames, K, rmsdUpperTriangle, centroids, d_centroid_rows, compute_stream);
+        CUDA_CHECK(cudaStreamSynchronize(compute_stream));
 
-        UpdateMedoids<<<K, threadsPerClusterBlock, sharedMemSize>>>(
-            N_frames,
-            d_centroids,
-            d_clusters,
-            d_frame_costs
+        // 2. Assign each frame to nearest centroid
+        AssignClusters<<<gridDim, blockDim, 0, compute_stream>>>(
+            N_frames, K, d_centroid_rows, d_clusters
         );
+        CUDA_CHECK(cudaStreamSynchronize(compute_stream));
+
+        // 3. Compute medoid costs in chunks
+        for (int chunk_start = 0; chunk_start < N_frames; chunk_start += CHUNK_SIZE) {
+            int chunk_size = std::min((size_t) CHUNK_SIZE, N_frames - chunk_start);
+            bool reset     = (chunk_start == 0);
+
+            // Upload chunk on transfer stream
+            uploadChunk(
+                N_frames, chunk_start, chunk_size,
+                rmsdUpperTriangle, d_chunk, h_chunk_pinned,
+                transfer_stream
+            );
+            CUDA_CHECK(cudaStreamSynchronize(transfer_stream)); // chunk ready before kernel
+
+            ComputeMedoidCosts_Chunk<<<gridDim, blockDim, 0, compute_stream>>>(
+                N_frames, chunk_start, chunk_size,
+                d_chunk, d_clusters, d_frame_costs, reset
+            );
+            CUDA_CHECK(cudaStreamSynchronize(compute_stream));
+        }
+
+        // 4. Update medoids
+        UpdateMedoids<<<reducingBlocks, blockDim, sharedMemSize, compute_stream>>>(
+            N_frames, d_centroids, d_clusters, d_frame_costs
+        );
+        CUDA_CHECK(cudaStreamSynchronize(compute_stream));
+
+        // 5. Pull centroids back to CPU (needed for uploadCentroidRows next iter)
+        CUDA_CHECK(cudaMemcpyAsync(
+            centroids, d_centroids, K * sizeof(int),
+            cudaMemcpyDeviceToHost, compute_stream
+        ));
+        CUDA_CHECK(cudaStreamSynchronize(compute_stream));
     }
     CUDA_CHECK(cudaDeviceSynchronize());
+
+    // ---- Cleanup ----
+    CUDA_CHECK(cudaFree(d_centroid_rows));
+    CUDA_CHECK(cudaFree(d_chunk));
+    CUDA_CHECK(cudaFreeHost(h_chunk_pinned));
+    CUDA_CHECK(cudaFree(d_frame_costs));
+    CUDA_CHECK(cudaStreamDestroy(compute_stream));
+    CUDA_CHECK(cudaStreamDestroy(transfer_stream));
 
     // Copying results back
     CUDA_CHECK(cudaMemcpy(centroids, d_centroids, K * sizeof(int), cudaMemcpyDeviceToHost));
@@ -354,7 +390,7 @@ int main(int argc, char** args)
     // -----------------------------------------------------------------------
     // Cleanup
     // -----------------------------------------------------------------------
-    CUDA_CHECK(cudaFree(d_rmsdUpperTriangle));
+    // CUDA_CHECK(cudaFree(d_rmsdUpperTriangle));
     CUDA_CHECK(cudaFree(d_centroids));
     CUDA_CHECK(cudaFree(d_clusters));
     CUDA_CHECK(cudaFree(d_frame_costs));

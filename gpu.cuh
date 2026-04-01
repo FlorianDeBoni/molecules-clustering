@@ -75,18 +75,19 @@ __global__
 void AssignClusters(
     int N_frames,
     int K,
-    const float* __restrict__ rmsd,
-    int* centroidsGPU,
-    int* clustersGPU,
-    float* frameCosts
+    const float* __restrict__ centroid_rows,  // [K x N_frames], dense
+    int* clustersGPU
 );
 
 __global__
-void ComputeMedoidCosts(
+void ComputeMedoidCosts_Chunk(
     int N_frames,
-    const float* __restrict__ rmsd,
-    int* clustersGPU,
-    float* frameCostsGPU
+    int chunk_start,
+    int chunk_size,
+    const float* __restrict__ rmsd_chunk,  // [chunk_size x N_frames], dense
+    const int*   clustersGPU,
+    float*       frameCosts,
+    bool         reset
 );
 
 __global__

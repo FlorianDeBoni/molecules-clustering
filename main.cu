@@ -2,6 +2,7 @@
 #include "gpu.cuh"
 #include "utils.cuh"
 
+#include "CudaTimer.cuh"
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -10,12 +11,12 @@
 #include <cmath>
 #include <cuda_runtime.h>
 
-using chrono_type = std::chrono::high_resolution_clock::time_point;
-using chrono_time = std::chrono::high_resolution_clock;
+// using chrono_type = std::chrono::high_resolution_clock::time_point;
+// using chrono_time = std::chrono::high_resolution_clock;
 
-static inline double elapsed_s(const chrono_type& start) {
-    return std::chrono::duration<double>(chrono_time::now() - start).count();
-}
+// static inline double elapsed_s(const chrono_type& start) {
+//     return std::chrono::duration<double>(chrono_time::now() - start).count();
+// }
 
 // ---------------------------------------------------------------------------
 // CUDA error-checking macro
@@ -34,13 +35,16 @@ int main(int argc, char** args)
 {
     chrono_type global_start = chrono_time::now();
 
+    CudaTimer timer;
+
     if(argc < 2){
         std::cerr << "Usage: " << args[0] << " <dataset.bin>\n";
         return 1;
     }
 
+    timer.start("1. Loading .bin");
     FileUtils file(args[1]);
-    size_t N_frames = 30000;
+    size_t N_frames = 15000;
     size_t N_atoms  = file.getN_atoms();
     size_t N_dims   = file.getN_dims();
 
@@ -50,6 +54,7 @@ int main(int argc, char** args)
 
     std::vector<float> all_data(N_frames * N_atoms * 3);
     file.readSnapshotsFastInPlace(0, N_frames - 1, all_data);
+    timer.stop("1. Loading .bin");
 
     // -----------------------------------------------------------------------
     // Chunk sizing
@@ -98,11 +103,48 @@ int main(int argc, char** args)
     CUDA_CHECK(cudaMalloc(&d_cz_tgt, NB_FRAMES_PER_CHUNK * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_G_tgt,  NB_FRAMES_PER_CHUNK * sizeof(float)));
 
-    dim3 threads(32, 8);
-    double centroid_time = 0.0;
-    double rmsd_time     = 0.0;
+    // [Optimization A] Centroid cache — one slot per chunk index.
+    // All centroids are precomputed once before the RMSD double loop.
+    // Each chunk c occupies a contiguous slice of NB_FRAMES_PER_CHUNK floats
+    // starting at c * NB_FRAMES_PER_CHUNK.
+    float *d_cx_cache, *d_cy_cache, *d_cz_cache, *d_G_cache;
+    size_t cache_slots = NB_ROW_ITERATIONS * NB_FRAMES_PER_CHUNK;
+    CUDA_CHECK(cudaMalloc(&d_cx_cache, cache_slots * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_cy_cache, cache_slots * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_cz_cache, cache_slots * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_G_cache,  cache_slots * sizeof(float)));
+
+    dim3 threads(64, 16);
     size_t total_centroid_frames = 0;
     size_t total_rmsd_pairs      = 0;
+
+    // -----------------------------------------------------------------------
+    // Precompute centroids for every chunk once, before the RMSD double loop.
+    // -----------------------------------------------------------------------
+    timer.start("2. Computing RMSD");
+    timer.start("2.1. Computation centroids");
+    std::vector<float> chunk_coords;
+    for (size_t c = 0; c < NB_ROW_ITERATIONS; c++)
+    {
+        size_t start_c = c * NB_FRAMES_PER_CHUNK;
+        size_t stop_c  = std::min(start_c + NB_FRAMES_PER_CHUNK, N_frames);
+        size_t nb_c    = stop_c - start_c;
+
+        file.extractSnapshotsFastInPlace(start_c, stop_c, all_data, chunk_coords);
+        CUDA_CHECK(cudaMemcpy(d_references, chunk_coords.data(),
+                                chunk_coords.size() * sizeof(float),
+                                cudaMemcpyHostToDevice));
+
+        computeCentroidsG<<<(nb_c + 127) / 128, 128>>>(
+            d_references, N_atoms, nb_c,
+            d_cx_cache + c * NB_FRAMES_PER_CHUNK,
+            d_cy_cache + c * NB_FRAMES_PER_CHUNK,
+            d_cz_cache + c * NB_FRAMES_PER_CHUNK,
+            d_G_cache  + c * NB_FRAMES_PER_CHUNK);
+        CUDA_CHECK(cudaDeviceSynchronize());
+        total_centroid_frames += nb_c;
+    }
+    timer.stop("2.1. Computation centroids");
 
     // -----------------------------------------------------------------------
     // Debug capture buffer: raw 2D window around the first chunk boundary.
@@ -117,6 +159,7 @@ int main(int argc, char** args)
     // -----------------------------------------------------------------------
     // RMSD computation
     // -----------------------------------------------------------------------
+    timer.start("2.2. Computation Global RMSD");
     for(size_t row = 0; row < NB_ROW_ITERATIONS; row++)
     {
         size_t start_row = row * NB_FRAMES_PER_CHUNK;
@@ -132,13 +175,13 @@ int main(int argc, char** args)
                               references_coordinates.size() * sizeof(float),
                               cudaMemcpyHostToDevice));
 
-        auto c0 = chrono_time::now();
-        computeCentroidsG<<<(nb_ref + 127) / 128, 128>>>(
-            d_references, N_atoms, nb_ref,
-            d_cx_ref, d_cy_ref, d_cz_ref, d_G_ref);
-        CUDA_CHECK(cudaDeviceSynchronize());
-        centroid_time += elapsed_s(c0);
-        total_centroid_frames += nb_ref;
+        // auto c0 = chrono_time::now();
+        // computeCentroidsG<<<(nb_ref + 127) / 128, 128>>>(
+        //     d_references, N_atoms, nb_ref,
+        //     d_cx_ref, d_cy_ref, d_cz_ref, d_G_ref);
+        // CUDA_CHECK(cudaDeviceSynchronize());
+        // centroid_time += elapsed_s(c0);
+        // total_centroid_frames += nb_ref;
 
         for(size_t col = row; col < NB_ROW_ITERATIONS; col++)
         {
@@ -154,13 +197,14 @@ int main(int argc, char** args)
             size_t smem_bytes   = 3 * TILE * threads.y * sizeof(float);
 
             if (row == col) {
-                auto k0 = chrono_time::now();
                 RMSD_diagonal<<<blocks, threads, smem_bytes>>>(
                     d_references, N_atoms, nb_ref,
-                    d_cx_ref, d_cy_ref, d_cz_ref, d_G_ref,
+                    d_cx_cache + row * NB_FRAMES_PER_CHUNK,
+                    d_cy_cache + row * NB_FRAMES_PER_CHUNK,
+                    d_cz_cache + row * NB_FRAMES_PER_CHUNK,
+                    d_G_cache  + row * NB_FRAMES_PER_CHUNK,
                     d_rmsd);
                 CUDA_CHECK(cudaDeviceSynchronize());
-                rmsd_time += elapsed_s(k0);
                 total_rmsd_pairs += nb_ref * nb_tgt;
             }
             else {
@@ -169,22 +213,25 @@ int main(int argc, char** args)
                                     targets_coordinates.size() * sizeof(float),
                                     cudaMemcpyHostToDevice));
 
-                auto c2 = chrono_time::now();
-                computeCentroidsG<<<(nb_tgt + 127) / 128, 128>>>(
-                    d_targets, N_atoms, nb_tgt,
-                    d_cx_tgt, d_cy_tgt, d_cz_tgt, d_G_tgt);
-                CUDA_CHECK(cudaDeviceSynchronize());
-                centroid_time += elapsed_s(c2);
-                total_centroid_frames += nb_tgt;
+                // computeCentroidsG<<<(nb_tgt + 127) / 128, 128>>>(
+                //     d_targets, N_atoms, nb_tgt,
+                //     d_cx_tgt, d_cy_tgt, d_cz_tgt, d_G_tgt);
+                // CUDA_CHECK(cudaDeviceSynchronize());
+                // centroid_time += elapsed_s(c2);
+                // total_centroid_frames += nb_tgt;
                 
-                auto k0 = chrono_time::now();
                 RMSD<<<blocks, threads, smem_bytes>>>(
                     d_references, d_targets, N_atoms, nb_ref, nb_tgt,
-                    d_cx_ref, d_cy_ref, d_cz_ref, d_G_ref,
-                    d_cx_tgt, d_cy_tgt, d_cz_tgt, d_G_tgt,
+                    d_cx_cache + row * NB_FRAMES_PER_CHUNK,
+                    d_cy_cache + row * NB_FRAMES_PER_CHUNK,
+                    d_cz_cache + row * NB_FRAMES_PER_CHUNK,
+                    d_G_cache  + row * NB_FRAMES_PER_CHUNK,
+                    d_cx_cache + col * NB_FRAMES_PER_CHUNK,
+                    d_cy_cache + col * NB_FRAMES_PER_CHUNK,
+                    d_cz_cache + col * NB_FRAMES_PER_CHUNK,
+                    d_G_cache  + col * NB_FRAMES_PER_CHUNK,
                     d_rmsd);
                 CUDA_CHECK(cudaDeviceSynchronize());
-                rmsd_time += elapsed_s(k0);
                 total_rmsd_pairs += nb_ref * nb_tgt;
             }
 
@@ -228,18 +275,19 @@ int main(int argc, char** args)
         }
     }
 
-    double pipeline_time = elapsed_s(global_start);
+    timer.stop("2.2. Computation Global RMSD");
+    timer.stop("2. Computing RMSD");
 
-    // -----------------------------------------------------------------------
-    // Throughput
-    // -----------------------------------------------------------------------
-    std::cout << "\n===== PERFORMANCE =====\n";
-    std::cout << "Centroid compute : " << total_centroid_frames / centroid_time
-              << " molecules/s (" << centroid_time << " s)\n";
-    std::cout << "RMSD kernel      : " << total_rmsd_pairs / rmsd_time
-              << " RMSD/s (" << rmsd_time << " s)\n";
-    std::cout << "Full pipeline    : " << total_rmsd_pairs / pipeline_time
-              << " RMSD/s (" << pipeline_time << " s)\n";
+    // // -----------------------------------------------------------------------
+    // // Throughput
+    // // -----------------------------------------------------------------------
+    // std::cout << "\n===== PERFORMANCE =====\n";
+    // std::cout << "Centroid compute : " << total_centroid_frames / centroid_time
+    //           << " molecules/s (" << centroid_time << " s)\n";
+    // std::cout << "RMSD kernel      : " << total_rmsd_pairs / rmsd_time
+    //           << " RMSD/s (" << rmsd_time << " s)\n";
+    // std::cout << "Full pipeline    : " << total_rmsd_pairs / pipeline_time
+    //           << " RMSD/s (" << pipeline_time << " s)\n";
     
     // saveArrayToFile("output/RMSD_centroid.txt", rmsdUpperTriangle, upper_triangle_size);
 
@@ -278,18 +326,89 @@ int main(int argc, char** args)
     // -----------------------------------------------------------------------
     // K-Medoids clustering  (rmsdUpperTriangle already in packed format)
     // -----------------------------------------------------------------------
+    timer.start("3. Computing Clusters");
+    timer.start("3.1. Clustering setup");
     int K        = 10;
     int MAX_ITER = 50;
-    int* centroids = new int[K];
-    int* clusters  = new int[N_frames];
 
-    auto t_clust = chrono_time::now();
-    float db_index = runKMedoids(N_frames, K, rmsdUpperTriangle, MAX_ITER, centroids, clusters);
-    double clust_time = elapsed_s(t_clust);
+
+    // Allocating GPU arrays
+    int* centroids = new int[K];
+    int* d_centroids;
+    CUDA_CHECK(cudaMalloc(&d_centroids, K * sizeof(int)));
+
+    int* clusters  = new int[N_frames];
+    int* d_clusters;
+    CUDA_CHECK(cudaMalloc(&d_clusters, N_frames * sizeof(int)));
+
+    float* d_rmsdUpperTriangle = nullptr;
+    size_t tri_bytes = upper_triangle_size * sizeof(float);
+    CUDA_CHECK(cudaMalloc(&d_rmsdUpperTriangle, tri_bytes));
+    CUDA_CHECK(cudaMemcpy(d_rmsdUpperTriangle, rmsdUpperTriangle, tri_bytes,
+                cudaMemcpyHostToDevice));
+    
+    float* d_frame_costs;
+    CUDA_CHECK(cudaMalloc(&d_frame_costs, N_frames * sizeof(float)));
+
+
+    // Pick first K unique indices
+    pickKMedoidsPlusPlus(N_frames, K, rmsdUpperTriangle, centroids);
+    CUDA_CHECK(cudaMemcpy(d_centroids, centroids, K*sizeof(int), cudaMemcpyHostToDevice));
+
+    timer.stop("3.1. Clustering setup");
+
+
+    // Assignment step params
+    dim3 clusteringThreads(1024);
+    dim3 clusteringBlocks((N_frames + clusteringThreads.x - 1) / clusteringThreads.x);
+    // Centroids update step params
+    dim3 threadsPerClusterBlock(1024);
+    dim3 reducingBlocks(K);
+    size_t sharedMemSize = threadsPerClusterBlock.x * (sizeof(float) + sizeof(int));
+
+    for (int iter = 0; iter < MAX_ITER; iter++) {
+        AssignClusters<<<clusteringBlocks, clusteringThreads>>>(
+            N_frames,
+            K,
+            d_rmsdUpperTriangle,
+            d_centroids,
+            d_clusters,
+            d_frame_costs
+        );
+        // Making sure all assignments are set across mutiliple blocks
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        ComputeMedoidCosts<<<clusteringBlocks, clusteringThreads>>>(
+            N_frames,
+            d_rmsdUpperTriangle,
+            d_clusters,
+            d_frame_costs
+        );
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        UpdateMedoids<<<K, threadsPerClusterBlock, sharedMemSize>>>(
+            N_frames,
+            d_centroids,
+            d_clusters,
+            d_frame_costs
+        );
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Copying results back
+    CUDA_CHECK(cudaMemcpy(centroids, d_centroids, K * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(clusters, d_clusters, N_frames * sizeof(int), cudaMemcpyDeviceToHost));
+
+    timer.stop("3. Computing Clusters");
+
+
+    // -----------------------------------------------------------------------
+    // Final Clustering Results:
+    // -----------------------------------------------------------------------
+    float db_index = daviesBouldinIndex(N_frames, K, clusters, centroids, rmsdUpperTriangle);
+
 
     std::cout << "\n===== K-MEDOIDS =====\n";
-    std::cout << "Clustering speed : " << N_frames / clust_time
-              << " molecules/s (" << clust_time << " s)\n";
     std::cout << "Davies-Bouldin index : " << db_index << "\n";
 
     float random_db = runRandomClustering(N_frames, K, rmsdUpperTriangle);
@@ -298,23 +417,26 @@ int main(int argc, char** args)
 
     saveClusters(clusters, N_frames, centroids, K);
 
+
     // -----------------------------------------------------------------------
     // Cleanup
     // -----------------------------------------------------------------------
+    CUDA_CHECK(cudaFree(d_rmsdUpperTriangle));
+    CUDA_CHECK(cudaFree(d_centroids));
+    CUDA_CHECK(cudaFree(d_clusters));
+    CUDA_CHECK(cudaFree(d_frame_costs));
     CUDA_CHECK(cudaFree(d_references));
     CUDA_CHECK(cudaFree(d_targets));
     CUDA_CHECK(cudaFree(d_rmsd));
-    CUDA_CHECK(cudaFree(d_cx_ref)); CUDA_CHECK(cudaFree(d_cy_ref));
-    CUDA_CHECK(cudaFree(d_cz_ref)); CUDA_CHECK(cudaFree(d_G_ref));
-    CUDA_CHECK(cudaFree(d_cx_tgt)); CUDA_CHECK(cudaFree(d_cy_tgt));
-    CUDA_CHECK(cudaFree(d_cz_tgt)); CUDA_CHECK(cudaFree(d_G_tgt));
+    CUDA_CHECK(cudaFree(d_cx_cache)); CUDA_CHECK(cudaFree(d_cy_cache));
+    CUDA_CHECK(cudaFree(d_cz_cache)); CUDA_CHECK(cudaFree(d_G_cache));
+
+    timer.print();
 
     delete[] rmsdUpperTriangle;
     delete[] rmsdHostChunk;
     delete[] centroids;
     delete[] clusters;
-
-    measure_seconds(global_start, "Total program time");
 
     return 0;
 }

@@ -18,6 +18,115 @@
 //     return std::chrono::duration<double>(chrono_time::now() - start).count();
 // }
 
+// void exportClusteringToJSON(
+//     const char* filename,
+//     const float* frame,
+//     const int* clusters,
+//     const int* centroids,
+//     int N_frames,
+//     int N_atoms,
+//     int N_dims,
+//     int K
+// );
+
+// void exportClusteringToJSON(
+//     const char* filename,
+//     const float* frame,
+//     const int*   clusters,
+//     const int*   centroids,
+//     int N_frames,
+//     int N_atoms,
+//     int N_dims,
+//     int K
+// );
+
+void exportClusteringToJSON(
+    const char* filename,
+    const float* frame,
+    const int*   clusters,
+    const int*   centroids,
+    int N_frames,
+    int N_atoms,
+    int N_dims,
+    int K
+) {
+    std::ofstream file(filename);
+ 
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open file " << filename
+                  << " for writing" << std::endl;
+        return;
+    }
+ 
+    file << std::setprecision(6) << std::fixed;
+ 
+    // ── metadata ────────────────────────────────────────────────────────────
+    file << "{\n";
+    file << "  \"metadata\": {\n";
+    file << "    \"n_frames\": "     << N_frames << ",\n";
+    file << "    \"n_atoms\": "      << N_atoms  << ",\n";
+    file << "    \"n_dimensions\": " << N_dims   << ",\n";
+    file << "    \"n_clusters\": "   << K        << "\n";
+    file << "  },\n";
+ 
+    // ── centroids list ───────────────────────────────────────────────────────
+    file << "  \"centroids\": [";
+    for (int k = 0; k < K; k++) {
+        file << centroids[k];
+        if (k < K - 1) file << ", ";
+    }
+    file << "],\n";
+ 
+    // ── snapshots ────────────────────────────────────────────────────────────
+    file << "  \"snapshots\": [\n";
+ 
+    // stride between two consecutive snapshots in the AoS flat array
+    const int snapshot_stride = N_atoms * N_dims;   // == N_atoms * 3
+ 
+    for (int f = 0; f < N_frames; f++) {
+ 
+        // Check whether this snapshot is a medoid
+        bool is_centroid = false;
+        for (int k = 0; k < K; k++) {
+            if (centroids[k] == f) { is_centroid = true; break; }
+        }
+ 
+        file << "    {\n";
+        file << "      \"id\": "         << f             << ",\n";
+        file << "      \"cluster\": "    << clusters[f]   << ",\n";
+        file << "      \"is_centroid\": " << (is_centroid ? "true" : "false") << ",\n";
+        file << "      \"atoms\": [\n";
+ 
+        // Base offset for snapshot f in the AoS array
+        const int base = f * snapshot_stride;
+ 
+        for (int a = 0; a < N_atoms; a++) {
+            // AoS layout: [f][a][0=x, 1=y, 2=z]
+            float x = frame[base + a * 3 + 0];
+            float y = frame[base + a * 3 + 1];
+            float z = frame[base + a * 3 + 2];
+ 
+            file << "        {\"x\": " << x
+                 << ", \"y\": "        << y
+                 << ", \"z\": "        << z << "}";
+ 
+            if (a < N_atoms - 1) file << ",";
+            file << "\n";
+        }
+ 
+        file << "      ]\n";
+        file << "    }";
+        if (f < N_frames - 1) file << ",";
+        file << "\n";
+    }
+ 
+    file << "  ]\n";
+    file << "}\n";
+ 
+    file.close();
+    std::cout << "Clustering results exported to " << filename << std::endl;
+}
+
 // ---------------------------------------------------------------------------
 // CUDA error-checking macro
 // ---------------------------------------------------------------------------
@@ -44,7 +153,7 @@ int main(int argc, char** args)
 
     timer.start("1. Loading .bin");
     FileUtils file(args[1]);
-    size_t N_frames = 15000;
+    size_t N_frames = 30000;
     size_t N_atoms  = file.getN_atoms();
     size_t N_dims   = file.getN_dims();
 
@@ -416,6 +525,19 @@ int main(int argc, char** args)
     std::cout << "Improvement : " << ((random_db - db_index) / random_db) * 100.0 << "%\n";
 
     saveClusters(clusters, N_frames, centroids, K);
+
+    std::cout << "Exporting data to output/clustering_results.json" << std::endl;
+
+    // exportClusteringToJSON(
+    //     "output/clustering_results.json",
+    //     all_data.data(),
+    //     clusters,
+    //     centroids,
+    //     N_frames,
+    //     N_atoms,
+    //     N_dims,
+    //     K
+    // );
 
 
     // -----------------------------------------------------------------------

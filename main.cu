@@ -87,6 +87,22 @@ int main(int argc, char** args)
     size_t total_rmsd_pairs      = 0;
 
     // -----------------------------------------------------------------------
+    // Accumulators
+    //   cent_*  : centroid precompute loop
+    //   rmsd_*  : RMSD double loop
+    // -----------------------------------------------------------------------
+    float cent_extract_ms = 0.f;   // file extraction
+    float cent_h2d_ms     = 0.f;   // H->D coord transfers
+    float cent_kernel_ms  = 0.f;   // computeCentroidsG kernel
+
+    float rmsd_ref_extract_ms = 0.f;  // file extraction — references (outer loop)
+    float rmsd_tgt_extract_ms = 0.f;  // file extraction — targets    (inner loop)
+    float rmsd_h2d_ms         = 0.f;  // H->D coord transfers
+    float rmsd_d2h_ms         = 0.f;  // D->H chunk transfers
+    float rmsd_tri_ms         = 0.f;  // triangle packing writes
+    float rmsd_kernel_ms      = 0.f;  // RMSD kernel
+
+    // -----------------------------------------------------------------------
     // Precompute centroids
     // -----------------------------------------------------------------------
     timer.start("2. Computing RMSD");
@@ -98,11 +114,17 @@ int main(int argc, char** args)
         size_t stop_c  = std::min(start_c + NB_FRAMES_PER_CHUNK, N_frames);
         size_t nb_c    = stop_c - start_c;
 
+        timer.start("_cent_extract");
         file.extractSnapshotsFastInPlace(start_c, stop_c, all_data, chunk_coords);
-        CUDA_CHECK(cudaMemcpy(d_references, chunk_coords.data(),
-                                chunk_coords.size() * sizeof(float),
-                                cudaMemcpyHostToDevice));
+        timer.stopAccum("_cent_extract", cent_extract_ms);
 
+        timer.start("_cent_h2d");
+        CUDA_CHECK(cudaMemcpy(d_references, chunk_coords.data(),
+                              chunk_coords.size() * sizeof(float),
+                              cudaMemcpyHostToDevice));
+        timer.stopAccum("_cent_h2d", cent_h2d_ms);
+
+        timer.start("_cent_kernel");
         computeCentroidsG<<<(nb_c + 127) / 128, 128>>>(
             d_references, N_atoms, nb_c,
             d_cx_cache + c * NB_FRAMES_PER_CHUNK,
@@ -110,6 +132,8 @@ int main(int argc, char** args)
             d_cz_cache + c * NB_FRAMES_PER_CHUNK,
             d_G_cache  + c * NB_FRAMES_PER_CHUNK);
         CUDA_CHECK(cudaDeviceSynchronize());
+        timer.stopAccum("_cent_kernel", cent_kernel_ms);
+
         total_centroid_frames += nb_c;
     }
     timer.stop("2.1. Computation centroids");
@@ -124,10 +148,8 @@ int main(int argc, char** args)
     std::vector<float> dbg(dbg_size * dbg_size, -1.0f);
 
     // -----------------------------------------------------------------------
-    // RMSD computation — transfer/write accumulators
+    // RMSD computation
     // -----------------------------------------------------------------------
-    float acc_h2d_ms = 0.f, acc_d2h_ms = 0.f, acc_tri_ms = 0.f;
-
     timer.start("2.2. Computation Global RMSD");
     for(size_t row = 0; row < NB_ROW_ITERATIONS; row++)
     {
@@ -135,13 +157,15 @@ int main(int argc, char** args)
         size_t stop_row  = std::min(start_row + NB_FRAMES_PER_CHUNK, N_frames);
         size_t nb_ref    = stop_row - start_row;
 
+        timer.start("_rmsd_ref_extract");
         file.extractSnapshotsFastInPlace(start_row, stop_row, all_data, references_coordinates);
+        timer.stopAccum("_rmsd_ref_extract", rmsd_ref_extract_ms);
 
-        timer.start("_h2d");
+        timer.start("_rmsd_h2d");
         CUDA_CHECK(cudaMemcpy(d_references, references_coordinates.data(),
                               references_coordinates.size() * sizeof(float),
                               cudaMemcpyHostToDevice));
-        timer.stopAccum("_h2d", acc_h2d_ms);
+        timer.stopAccum("_rmsd_h2d", rmsd_h2d_ms);
 
         for(size_t col = row; col < NB_ROW_ITERATIONS; col++)
         {
@@ -149,13 +173,15 @@ int main(int argc, char** args)
             size_t stop_col  = std::min(start_col + NB_FRAMES_PER_CHUNK, N_frames);
             size_t nb_tgt    = stop_col - start_col;
 
+            timer.start("_rmsd_tgt_extract");
             file.extractSnapshotsFastInPlace(start_col, stop_col, all_data, targets_coordinates);
+            timer.stopAccum("_rmsd_tgt_extract", rmsd_tgt_extract_ms);
 
-            timer.start("_h2d");
+            timer.start("_rmsd_h2d");
             CUDA_CHECK(cudaMemcpy(d_targets, targets_coordinates.data(),
                                   targets_coordinates.size() * sizeof(float),
                                   cudaMemcpyHostToDevice));
-            timer.stopAccum("_h2d", acc_h2d_ms);
+            timer.stopAccum("_rmsd_h2d", rmsd_h2d_ms);
 
             dim3 blocks((nb_tgt + threads.x - 1) / threads.x,
                         (nb_ref + threads.y - 1) / threads.y);
@@ -163,6 +189,7 @@ int main(int argc, char** args)
             const int TILE    = threads.x;
             size_t smem_bytes = 3 * TILE * threads.y * sizeof(float);
 
+            timer.start("_rmsd_kernel");
             RMSD<<<blocks, threads, smem_bytes>>>(
                 d_references, d_targets, N_atoms, nb_ref, nb_tgt,
                 d_cx_cache + row * NB_FRAMES_PER_CHUNK,
@@ -175,13 +202,15 @@ int main(int argc, char** args)
                 d_G_cache  + col * NB_FRAMES_PER_CHUNK,
                 d_rmsd);
             CUDA_CHECK(cudaDeviceSynchronize());
+            timer.stopAccum("_rmsd_kernel", rmsd_kernel_ms);
+
             total_rmsd_pairs += nb_ref * nb_tgt;
 
-            timer.start("_d2h");
+            timer.start("_rmsd_d2h");
             CUDA_CHECK(cudaMemcpy(rmsdHostChunk, d_rmsd,
                                   nb_ref * nb_tgt * sizeof(float),
                                   cudaMemcpyDeviceToHost));
-            timer.stopAccum("_d2h", acc_d2h_ms);
+            timer.stopAccum("_rmsd_d2h", rmsd_d2h_ms);
 
             // Capture debug window
             for (size_t i = 0; i < nb_ref; i++) {
@@ -196,7 +225,7 @@ int main(int argc, char** args)
             }
 
             // Pack into upper-triangle storage
-            timer.start("_tri");
+            timer.start("_rmsd_tri");
             for(size_t i = 0; i < nb_ref; i++)
             {
                 size_t global_i = start_row + i;
@@ -212,22 +241,34 @@ int main(int argc, char** args)
                     rmsdUpperTriangle[idx] = rmsdHostChunk[i * nb_tgt + j];
                 }
             }
-            timer.stopAccum("_tri", acc_tri_ms);
+            timer.stopAccum("_rmsd_tri", rmsd_tri_ms);
         }
     }
     timer.stop("2.2. Computation Global RMSD");
     timer.stop("2. Computing RMSD");
 
     // -----------------------------------------------------------------------
-    // Transfer / write breakdown
+    // Detailed breakdown printout
     // -----------------------------------------------------------------------
-    printf("\n%-30s %10s\n", "Transfer/Write breakdown", "Time (s)");
-    printf("%s\n", std::string(42, '-').c_str());
-    printf("%-30s %10.3f s\n", "  H->D (coords)",    acc_h2d_ms / 1000.f);
-    printf("%-30s %10.3f s\n", "  D->H (chunks)",    acc_d2h_ms / 1000.f);
-    printf("%-30s %10.3f s\n", "  Triangle writes",  acc_tri_ms / 1000.f);
-    printf("%-30s %10.3f s\n", "  Total",
-           (acc_h2d_ms + acc_d2h_ms + acc_tri_ms) / 1000.f);
+    printf("\n%-38s %10s\n", "Detailed breakdown", "Time (s)");
+    printf("%s\n", std::string(50, '-').c_str());
+    printf("  %-36s\n", "[ Centroids loop ]");
+    printf("    %-34s %10.3f s\n", "File extraction",        cent_extract_ms / 1000.f);
+    printf("    %-34s %10.3f s\n", "H->D transfers",         cent_h2d_ms     / 1000.f);
+    printf("    %-34s %10.3f s\n", "computeCentroidsG kernel", cent_kernel_ms / 1000.f);
+    printf("%s\n", std::string(50, '-').c_str());
+    printf("  %-36s\n", "[ RMSD loop ]");
+    printf("    %-34s %10.3f s\n", "File extraction (refs)", rmsd_ref_extract_ms / 1000.f);
+    printf("    %-34s %10.3f s\n", "File extraction (tgts)", rmsd_tgt_extract_ms / 1000.f);
+    printf("    %-34s %10.3f s\n", "H->D transfers",         rmsd_h2d_ms         / 1000.f);
+    printf("    %-34s %10.3f s\n", "D->H transfers",         rmsd_d2h_ms         / 1000.f);
+    printf("    %-34s %10.3f s\n", "Triangle writes",        rmsd_tri_ms         / 1000.f);
+    printf("    %-34s %10.3f s\n", "RMSD kernel",            rmsd_kernel_ms      / 1000.f);
+    printf("%s\n", std::string(50, '-').c_str());
+    float grand_total = cent_extract_ms + cent_h2d_ms     + cent_kernel_ms
+                      + rmsd_ref_extract_ms + rmsd_tgt_extract_ms
+                      + rmsd_h2d_ms + rmsd_d2h_ms + rmsd_tri_ms + rmsd_kernel_ms;
+    printf("  %-36s %10.3f s\n", "Grand total (accounted)", grand_total / 1000.f);
 
     // -----------------------------------------------------------------------
     // DEBUG: inspect RMSD around chunk boundary

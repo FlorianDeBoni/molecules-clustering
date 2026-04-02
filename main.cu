@@ -19,8 +19,6 @@
         }                                                                       \
     } while (0)
 
-// ... exportClusteringToJSON unchanged ...
-
 int main(int argc, char** args)
 {
     CudaTimer timer;
@@ -32,17 +30,9 @@ int main(int argc, char** args)
 
     timer.start("1. Loading .bin");
     FileUtils file(args[1]);
-    size_t N_frames = 10000;           // from new branch
+    size_t N_frames = 10000;
     size_t N_atoms  = file.getN_atoms();
     size_t N_dims   = file.getN_dims();
-
-    std::cout << "\n===== DATASET INFO =====\n";
-    std::cout << "Frames : " << N_frames << "\n";
-    std::cout << "Atoms  : " << N_atoms  << "\n\n";
-
-    std::vector<float> all_data(N_frames * N_atoms * 3);
-    file.readSnapshotsFastInPlace(0, N_frames - 1, all_data);
-    timer.stop("1. Loading .bin");
 
     // -----------------------------------------------------------------------
     // Chunk sizing
@@ -51,8 +41,18 @@ int main(int argc, char** args)
     const size_t NB_FRAMES_PER_CHUNK = get_chunk_frame_nb(MAX_DATA_CHUNK_SIZE, N_atoms, N_dims);
     const size_t NB_ROW_ITERATIONS   = (size_t)std::ceil((double)N_frames / NB_FRAMES_PER_CHUNK);
 
-    std::cout << "Chunk size     : " << NB_FRAMES_PER_CHUNK << " frames\n";
-    std::cout << "Row iterations : " << NB_ROW_ITERATIONS   << "\n\n";
+    std::cout << "\n" << std::string(70, '=') << "\n";
+    std::cout << "DATASET INFO\n";
+    std::cout << std::string(70, '=') << "\n";
+    std::cout << "Frames             : " << N_frames           << "\n";
+    std::cout << "Atoms              : " << N_atoms            << "\n";
+    std::cout << "Chunk size         : " << NB_FRAMES_PER_CHUNK << " frames\n";
+    std::cout << "Row iterations     : " << NB_ROW_ITERATIONS   << "\n";
+    std::cout << std::string(70, '=') << "\n\n";
+
+    std::vector<float> all_data(N_frames * N_atoms * 3);
+    file.readSnapshotsFastInPlace(0, N_frames - 1, all_data);
+    timer.stop("1. Loading .bin");
 
     // -----------------------------------------------------------------------
     // Host buffers
@@ -79,7 +79,7 @@ int main(int argc, char** args)
     CUDA_CHECK(cudaMalloc(&d_cz_cache, cache_slots * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_G_cache,  cache_slots * sizeof(float)));
 
-    dim3 threads(64, 8);              // from new branch
+    dim3 threads(64, 8);
     size_t total_centroid_frames = 0;
     size_t total_rmsd_pairs      = 0;
 
@@ -97,7 +97,7 @@ int main(int argc, char** args)
     float rmsd_kernel_ms      = 0.f;
 
     // -----------------------------------------------------------------------
-    // Precompute centroids  (single pass, with accumulators)
+    // Precompute centroids
     // -----------------------------------------------------------------------
     timer.start("2. Computing RMSD");
     timer.start("2.1. Computation centroids");
@@ -215,7 +215,6 @@ int main(int argc, char** args)
                                   cudaMemcpyDeviceToHost));
             timer.stopAccum("_rmsd_d2h", rmsd_d2h_ms);
 
-            // Debug window capture
             for (size_t i = 0; i < nb_ref; i++) {
                 size_t gi = start_row + i;
                 if (gi < dbg_start || gi >= dbg_end) continue;
@@ -227,7 +226,6 @@ int main(int argc, char** args)
                 }
             }
 
-            // Pack into upper-triangle storage
             timer.start("_rmsd_tri");
             for (size_t i = 0; i < nb_ref; i++) {
                 size_t global_i = start_row + i;
@@ -252,19 +250,19 @@ int main(int argc, char** args)
     printf("\n%-38s %10s\n", "Detailed breakdown", "Time (s)");
     printf("%s\n", std::string(50, '-').c_str());
     printf("  %-36s\n", "[ Centroids loop ]");
-    printf("    %-34s %10.3f s\n", "File extraction",          cent_extract_ms / 1000.f);
-    printf("    %-34s %10.3f s\n", "H->D transfers",           cent_h2d_ms     / 1000.f);
-    printf("    %-34s %10.3f s\n", "computeCentroidsG kernel",  cent_kernel_ms  / 1000.f);
+    printf("    %-34s %10.3f s\n", "File extraction",           cent_extract_ms     / 1000.f);
+    printf("    %-34s %10.3f s\n", "H->D transfers",            cent_h2d_ms         / 1000.f);
+    printf("    %-34s %10.3f s\n", "computeCentroidsG kernel",  cent_kernel_ms      / 1000.f);
     printf("%s\n", std::string(50, '-').c_str());
     printf("  %-36s\n", "[ RMSD loop ]");
-    printf("    %-34s %10.3f s\n", "File extraction (refs)",   rmsd_ref_extract_ms / 1000.f);
-    printf("    %-34s %10.3f s\n", "File extraction (tgts)",   rmsd_tgt_extract_ms / 1000.f);
-    printf("    %-34s %10.3f s\n", "H->D transfers",           rmsd_h2d_ms         / 1000.f);
-    printf("    %-34s %10.3f s\n", "D->H transfers",           rmsd_d2h_ms         / 1000.f);
-    printf("    %-34s %10.3f s\n", "Triangle writes",          rmsd_tri_ms         / 1000.f);
-    printf("    %-34s %10.3f s\n", "RMSD kernel",              rmsd_kernel_ms      / 1000.f);
+    printf("    %-34s %10.3f s\n", "File extraction (refs)",    rmsd_ref_extract_ms / 1000.f);
+    printf("    %-34s %10.3f s\n", "File extraction (tgts)",    rmsd_tgt_extract_ms / 1000.f);
+    printf("    %-34s %10.3f s\n", "H->D transfers",            rmsd_h2d_ms         / 1000.f);
+    printf("    %-34s %10.3f s\n", "D->H transfers",            rmsd_d2h_ms         / 1000.f);
+    printf("    %-34s %10.3f s\n", "Triangle writes",           rmsd_tri_ms         / 1000.f);
+    printf("    %-34s %10.3f s\n", "RMSD kernel",               rmsd_kernel_ms      / 1000.f);
     printf("%s\n", std::string(50, '-').c_str());
-    float grand_total = cent_extract_ms + cent_h2d_ms    + cent_kernel_ms
+    float grand_total = cent_extract_ms + cent_h2d_ms + cent_kernel_ms
                       + rmsd_ref_extract_ms + rmsd_tgt_extract_ms
                       + rmsd_h2d_ms + rmsd_d2h_ms + rmsd_tri_ms + rmsd_kernel_ms;
     printf("  %-36s %10.3f s\n", "Grand total (accounted)", grand_total / 1000.f);
@@ -296,10 +294,14 @@ int main(int argc, char** args)
     std::cout << "\n( '>' marks the first frame of the next chunk )\n\n";
 
     // -----------------------------------------------------------------------
-    // K-Medoids clustering  (GPU version from new branch)
+    // K-Medoids clustering  (GPU)
     // -----------------------------------------------------------------------
     int K        = 10;
     int MAX_ITER = 50;
+
+    std::cout << std::string(70, '=') << "\n";
+    std::cout << "K-MEDOIDS CLUSTERING (K=" << K << ", MAX_ITER=" << MAX_ITER << ")\n";
+    std::cout << std::string(70, '=') << "\n";
 
     int* centroids = new int[K];
     int* clusters  = new int[N_frames];
@@ -310,9 +312,9 @@ int main(int argc, char** args)
     float* d_rmsdUpperTriangle;
 
     size_t tri_bytes = upper_triangle_size * sizeof(float);
-    CUDA_CHECK(cudaMalloc(&d_centroids,        K          * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_clusters,         N_frames   * sizeof(int)));
-    CUDA_CHECK(cudaMalloc(&d_frame_costs,      N_frames   * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_centroids,         K        * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_clusters,          N_frames * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_frame_costs,       N_frames * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_rmsdUpperTriangle, tri_bytes));
     CUDA_CHECK(cudaMemcpy(d_rmsdUpperTriangle, rmsdUpperTriangle,
                           tri_bytes, cudaMemcpyHostToDevice));
@@ -328,7 +330,6 @@ int main(int argc, char** args)
     dim3 clusteringThreads(1024);
     dim3 clusteringBlocks((N_frames + clusteringThreads.x - 1) / clusteringThreads.x);
     dim3 threadsPerClusterBlock(1024);
-    dim3 reducingBlocks(K);
     size_t sharedMemSize = threadsPerClusterBlock.x * (sizeof(float) + sizeof(int));
 
     for (int iter = 0; iter < MAX_ITER; iter++)
@@ -346,8 +347,8 @@ int main(int argc, char** args)
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
-    CUDA_CHECK(cudaMemcpy(centroids, d_centroids, K * sizeof(int),         cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(clusters,  d_clusters,  N_frames * sizeof(int),  cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(centroids, d_centroids, K * sizeof(int),        cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(clusters,  d_clusters,  N_frames * sizeof(int), cudaMemcpyDeviceToHost));
 
     timer.stop("3. Computing Clusters");
 
@@ -356,12 +357,29 @@ int main(int argc, char** args)
     // -----------------------------------------------------------------------
     float db_index  = daviesBouldinIndex(N_frames, K, clusters, centroids, rmsdUpperTriangle);
     float random_db = runRandomClustering(N_frames, K, rmsdUpperTriangle);
+    float improvement = ((random_db - db_index) / random_db) * 100.0f;
 
-    std::cout << "\n===== K-MEDOIDS =====\n";
-    std::cout << "Davies-Bouldin index : " << db_index  << "\n";
-    std::cout << "Random DB index      : " << random_db << "\n";
-    std::cout << "Improvement          : "
-              << ((random_db - db_index) / random_db) * 100.0 << "%\n";
+    std::cout << std::string(70, '=') << "\n";
+    std::cout << "CLUSTERING RESULTS\n";
+    std::cout << std::string(70, '=') << "\n";
+    std::cout << std::fixed << std::setprecision(6);
+    std::cout << "K-medoids Davies-Bouldin index : " << db_index  << "\n";
+    std::cout << "Random    Davies-Bouldin index : " << random_db << "\n";
+    std::cout << "Improvement over random        : "
+              << std::setprecision(2) << improvement << "% "
+              << (improvement > 0 ? "✓ BETTER" : "✗ WORSE") << "\n";
+
+    std::vector<int> cluster_sizes(K, 0);
+    for (int i = 0; i < (int)N_frames; i++) cluster_sizes[clusters[i]]++;
+    std::cout << "\nCluster centroids and sizes:\n";
+    for (int k = 0; k < K; k++) {
+        float pct = 100.0f * cluster_sizes[k] / N_frames;
+        std::cout << "  Cluster " << std::setw(2) << k
+                  << " | Centroid: frame " << std::setw(6) << centroids[k]
+                  << " | Size: "           << std::setw(6) << cluster_sizes[k]
+                  << " (" << std::setprecision(2) << pct << "%)\n";
+    }
+    std::cout << std::string(70, '=') << "\n\n";
 
     saveClusters(clusters, N_frames, centroids, K);
 

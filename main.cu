@@ -32,7 +32,7 @@ int main(int argc, char** args)
 
     timer.start("1. Loading .bin");
     FileUtils file(args[1]);
-    size_t N_frames = 90000;           // from new branch
+    size_t N_frames = 10000;           // from new branch
     size_t N_atoms  = file.getN_atoms();
     size_t N_dims   = file.getN_dims();
 
@@ -79,7 +79,7 @@ int main(int argc, char** args)
     CUDA_CHECK(cudaMalloc(&d_cz_cache, cache_slots * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_G_cache,  cache_slots * sizeof(float)));
 
-    dim3 threads(64, 16);              // from new branch
+    dim3 threads(64, 8);              // from new branch
     size_t total_centroid_frames = 0;
     size_t total_rmsd_pairs      = 0;
 

@@ -38,6 +38,16 @@ struct CudaTimer {
         m.stopped = true;
     }
 
+    void stopAccum(const std::string& label, float& acc_ms) {
+        auto& m = measures[index[label]];
+        cudaEventRecord(m.stop);
+        cudaEventSynchronize(m.stop);   // must sync before ElapsedTime
+        float ms = 0;
+        cudaEventElapsedTime(&ms, m.start, m.stop);
+        acc_ms += ms;
+        m.stopped = false;  // mark as "in progress" so print() skips it
+    }
+
     void print() {
         cudaDeviceSynchronize();
         printf("\n%-30s %10s\n", "Stage", "Time (s)");

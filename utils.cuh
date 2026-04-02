@@ -1,19 +1,15 @@
 #pragma once
 
-#include "FileUtils.h"
+#include "FileUtils.hpp"
 #include <iostream>
 #include <fstream>
 #include <algorithm>
 #include <random>
 #include <vector>
 #include <stdio.h>
-#include <chrono>
 #include <iomanip>
 #include <cmath>
 
-// alias for the clock type
-using chrono_time = std::chrono::high_resolution_clock;
-using chrono_type = std::chrono::high_resolution_clock::time_point;
 
 // ============================================================================
 // UPPER TRIANGLE INDEXING HELPER (inline - can be in header)
@@ -21,9 +17,9 @@ using chrono_type = std::chrono::high_resolution_clock::time_point;
 inline float getRMSD(int i, int j, const float* rmsdPacked, int N_snapshots) {
     if (i == j) return 0.0f;
     if (i > j) std::swap(i, j);
-    size_t idx = (size_t)i * N_snapshots 
-               - ((size_t)i * ((size_t)i + 1)) / 2 
-               + (j - i - 1);
+    size_t idx = (size_t)i * N_snapshots
+           - ((size_t)i * ((size_t)i + 1)) / 2
+           + (j - i - 1);
     return rmsdPacked[idx];
 }
 
@@ -36,11 +32,8 @@ int trinv(int n);
 int triangle_read(int n);
 int sum_k(int k);
 int col_index_parcours(int i, int bound);
+void update_row_col(size_t idx, const size_t N_CHUNKS_PER_ROW, size_t& row, size_t& col);
 size_t get_chunk_frame_nb(size_t max_cap, size_t N_atoms, size_t N_dims);
-size_t get_optimal_tile_size(size_t max_cap_MB, size_t N_atoms, size_t N_dims, size_t N_frames);
-
-// Timing
-void measure_seconds(const chrono_type& start, const std::string& measurement);
 
 // K-medoids functions
 void pickRandomCentroids(int N_frames, int K, int* centroids);
@@ -52,3 +45,6 @@ float runKMedoids(int N_frames, int K, const float* rmsd, int MAX_ITER, int* cen
 float runRandomClustering(int N_frames, int K, const float* rmsd);
 float k_analysis(float* rmsd, size_t N_frames, int MAX_ITER, int K_MIN = 2, int K_MAX = 50);
 void saveClusters(const int* clusters, int N_frames, const int* centroids, int K);
+
+
+void saveArrayToFile(const char* filename, float* array, size_t size);

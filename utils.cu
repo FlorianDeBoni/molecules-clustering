@@ -20,24 +20,50 @@ int col_index_parcours(int i, int bound) {
     return (int) (bound - triangle_read( ((bound+1)*(bound+2)/2) - i - 1 ));
 }
 
-size_t get_chunk_frame_nb(size_t max_cap_MB, size_t N_atoms, size_t N_dims) {
-    // Convert max memory to number of floats
-    double max_floats = static_cast<double>(max_cap_MB) * 1024.0 * 1024.0 / sizeof(float);
+void update_row_col(size_t idx, const size_t N_CHUNKS_PER_ROW, size_t& row, size_t& col)
+{
+    // total number of elements in packed upper triangle
+    size_t total = N_CHUNKS_PER_ROW * (N_CHUNKS_PER_ROW + 1) / 2;
 
-    // Quadratic formula: F_tile^2 + 2*(N_atoms*N_dims)*F_tile - 2*max_floats = 0
+    if (idx >= total) return; // out of range
+
+    col = static_cast<size_t>((std::sqrt(8.0 * idx + 1) - 1) * 0.5);
+
+    // safety clamp (floating precision)
+    if (col >= N_CHUNKS_PER_ROW) col = N_CHUNKS_PER_ROW - 1;
+
+    size_t start = col * (col + 1) / 2;
+    row = idx - start;
+}
+
+size_t get_chunk_frame_nb(size_t max_cap_MB, size_t N_atoms, size_t N_dims)
+{
+    // Convert memory capacity to number of floats
+    double max_floats =
+        static_cast<double>(max_cap_MB) * 1024.0 * 1024.0 / sizeof(float);
+
+    // Real memory model:
+    // F² + (2*N_atoms*N_dims + 8)F <= max_floats
     double a = 1.0;
-    double b = 2.0 * static_cast<double>(N_atoms) * static_cast<double>(N_dims);
-    double c = -2.0 * max_floats;
+    double b = 2.0 * static_cast<double>(N_atoms) *
+               static_cast<double>(N_dims) + 8.0;
+    double c = -max_floats;
 
     double delta = b*b - 4.0*a*c;
-    if(delta < 0) {
+
+    if (delta < 0) {
         std::cerr << "Error: memory too small for even one frame!" << std::endl;
         return 0;
     }
 
-    double F_tile = (-b + std::sqrt(delta)) / (2.0 * a);
+    double F = (-b + std::sqrt(delta)) / (2.0 * a);
 
-    return static_cast<size_t>(std::floor(F_tile));
+    size_t result = static_cast<size_t>(std::floor(F));
+
+    // Align to warp size
+    result = (result / 32) * 32;
+
+    return result;
 }
 
 size_t get_optimal_tile_size(size_t max_cap_MB, size_t N_atoms, size_t N_dims, size_t N_frames) {
@@ -64,12 +90,6 @@ size_t get_optimal_tile_size(size_t max_cap_MB, size_t N_atoms, size_t N_dims, s
     F_tile = std::min(F_tile, MAX_SAFE_TILE);
 
     return static_cast<size_t>(std::floor(F_tile));
-}
-
-void measure_seconds(const chrono_type& start, const std::string& measurement) {
-    std::chrono::duration<float> elapsed = chrono_time::now()- start;
-    std::cout << std::left  << std::setw(30) << measurement << ": " 
-              << std::right << std::setw(10) << elapsed.count() << " s\n";
 }
 
 void pickKMedoidsPlusPlus(int N_snapshots, int K, const float* rmsd, int* centroids) {
@@ -349,4 +369,19 @@ void saveClusters(const int* clusters, int N_frames, const int* centroids, int K
     }
     out.close();
     std::cout << "✓ Cluster assignments saved to output/cluster_assignments.txt" << std::endl;
+}
+
+void saveArrayToFile(const char* filename, float* array, size_t size) {
+    std::ofstream file(filename);
+
+    if (!file) {
+        std::cerr << "Erreur lors de l'ouverture du fichier !" << std::endl;
+        return;
+    }
+
+    for (size_t i = 0; i < size; ++i) {
+        file << array[i] << "\n";
+    }
+
+    file.close();
 }

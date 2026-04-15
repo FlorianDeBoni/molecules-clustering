@@ -127,6 +127,33 @@ void exportClusteringToJSON(
     std::cout << "Clustering results exported to " << filename << std::endl;
 }
 
+
+
+void exportRMSDMatrix(
+    const char* filename,
+    const float* packed,
+    size_t N
+) {
+    std::ofstream file(filename);
+
+    if (!file.is_open()) {
+        std::cerr << "Error opening " << filename << std::endl;
+        return;
+    }
+
+    for (size_t i = 0; i < N; ++i) {
+        for (size_t j = 0; j < N; ++j) {
+            float val = getRMSD(i, j, packed, N);
+            file << val;
+            if (j < N - 1) file << ",";
+        }
+        file << "\n";
+    }
+
+    file.close();
+    std::cout << "RMSD matrix exported to " << filename << std::endl;
+}
+
 // ---------------------------------------------------------------------------
 // CUDA error-checking macro
 // ---------------------------------------------------------------------------
@@ -153,7 +180,7 @@ int main(int argc, char** args)
 
     timer.start("1. Loading .bin");
     FileUtils file(args[1]);
-    size_t N_frames = 30000;
+    size_t N_frames = 2500;
     size_t N_atoms  = file.getN_atoms();
     size_t N_dims   = file.getN_dims();
 

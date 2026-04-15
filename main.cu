@@ -180,7 +180,7 @@ int main(int argc, char** args)
 
     timer.start("1. Loading .bin");
     FileUtils file(args[1]);
-    size_t N_frames = 2500;
+    size_t N_frames = 1000;
     size_t N_atoms  = file.getN_atoms();
     size_t N_dims   = file.getN_dims();
 
@@ -464,7 +464,7 @@ int main(int argc, char** args)
     // -----------------------------------------------------------------------
     timer.start("3. Computing Clusters");
     timer.start("3.1. Clustering setup");
-    int K        = 10;
+    int K        = 5;
     int MAX_ITER = 50;
 
 
@@ -555,16 +555,18 @@ int main(int argc, char** args)
 
     std::cout << "Exporting data to output/clustering_results.json" << std::endl;
 
-    // exportClusteringToJSON(
-    //     "output/clustering_results.json",
-    //     all_data.data(),
-    //     clusters,
-    //     centroids,
-    //     N_frames,
-    //     N_atoms,
-    //     N_dims,
-    //     K
-    // );
+    exportClusteringToJSON(
+        "output/clustering_results.json",
+        all_data.data(),
+        clusters,
+        centroids,
+        N_frames,
+        N_atoms,
+        N_dims,
+        K
+    );
+
+    exportRMSDMatrix("output/rmsd_matrix.csv", all_data.data(), N_frames);
 
 
     // -----------------------------------------------------------------------
